@@ -809,11 +809,6 @@ if [ -n "$DYNAMIC_CONFIG_AGENT_URI" -o -n "$JSON_SECRET_KEY" ]; then
     set_property "json-secret-key" "$JSON_SECRET_KEY"
     set_property "dynamic-config-agent-uri" "$DYNAMIC_CONFIG_AGENT_URI"
 
-    # mysql database needed for guacamole runtime even with json-auth
-    associate_mysql
-
-    # no-need to link the json jar since it's injected into guacamole_home with docker
-    INSTALLED_AUTH="$INSTALLED_AUTH mysql"
 fi
 
 
