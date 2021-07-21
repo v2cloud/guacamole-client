@@ -23,6 +23,7 @@ import java.io.File;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
+import java.util.TimeZone;
 import org.apache.guacamole.GuacamoleException;
 import org.apache.guacamole.auth.jdbc.JDBCEnvironment;
 import org.slf4j.Logger;
@@ -369,7 +370,7 @@ public class MySQLEnvironment extends JDBCEnvironment {
      *     If guacamole.properties cannot be parsed.
      */
     public File getMySQLSSLClientStore() throws GuacamoleException {
-        return getProperty(MySQLGuacamoleProperties.MYSQL_SSL_TRUST_STORE);
+        return getProperty(MySQLGuacamoleProperties.MYSQL_SSL_CLIENT_STORE);
     }
     
     /**
@@ -384,13 +385,27 @@ public class MySQLEnvironment extends JDBCEnvironment {
      *     If guacamole.properties cannot be parsed.
      */
     public String getMYSQLSSLClientPassword() throws GuacamoleException {
-        return getProperty(MySQLGuacamoleProperties.MYSQL_SSL_TRUST_PASSWORD);
+        return getProperty(MySQLGuacamoleProperties.MYSQL_SSL_CLIENT_PASSWORD);
     }
     
     @Override
     public boolean autoCreateAbsentAccounts() throws GuacamoleException {
         return getProperty(MySQLGuacamoleProperties.MYSQL_AUTO_CREATE_ACCOUNTS,
                 false);
+    }
+
+    /**
+     * Return the server timezone if configured in guacamole.properties, or
+     * null if the configuration option is not present.
+     * 
+     * @return
+     *     The server timezone as configured in guacamole.properties.
+     * 
+     * @throws GuacamoleException 
+     *     If an error occurs retrieving the configuration value.
+     */
+    public TimeZone getServerTimeZone() throws GuacamoleException {
+        return getProperty(MySQLGuacamoleProperties.SERVER_TIMEZONE);
     }
 
 }

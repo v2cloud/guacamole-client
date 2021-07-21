@@ -33,6 +33,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import net.jradius.client.RadiusClient;
 import net.jradius.dictionary.Attr_CleartextPassword;
+import net.jradius.dictionary.Attr_ClientIPAddress;
+import net.jradius.dictionary.Attr_NASIPAddress;
+import net.jradius.dictionary.Attr_NASPortType;
 import net.jradius.dictionary.Attr_ReplyMessage;
 import net.jradius.dictionary.Attr_State;
 import net.jradius.dictionary.Attr_UserName;
@@ -164,6 +167,10 @@ public class RadiusConnectionService {
      * @param secret
      *     The secret, usually a password or challenge response, to send
      *     to authenticate to the RADIUS server.
+     * 
+     * @param clientAddress
+     *     The IP address of the client, if known, which will be set in as
+     *     the RADIUS client address.
      *
      * @param state
      *     The previous state of the RADIUS connection
@@ -174,7 +181,8 @@ public class RadiusConnectionService {
      * @throws GuacamoleException
      *     If an error occurs while talking to the server.
      */
-    public RadiusPacket authenticate(String username, String secret, byte[] state)
+    public RadiusPacket authenticate(String username, String secret, 
+                String clientAddress, byte[] state)
             throws GuacamoleException {
 
         // If a username wasn't passed, we quit
@@ -200,6 +208,9 @@ public class RadiusConnectionService {
         try {
             AttributeList radAttrs = new AttributeList();
             radAttrs.add(new Attr_UserName(username));
+            radAttrs.add(new Attr_ClientIPAddress(InetAddress.getByName(clientAddress)));
+            radAttrs.add(new Attr_NASIPAddress(InetAddress.getLocalHost()));
+            radAttrs.add(new Attr_NASPortType(Attr_NASPortType.Virtual));
             if (state != null && state.length > 0)
                 radAttrs.add(new Attr_State(state));
             radAttrs.add(new Attr_UserPassword(secret));
@@ -243,6 +254,11 @@ public class RadiusConnectionService {
             logger.debug("Unknown RADIUS algorithm.", e);
             return null;
         }
+        catch (UnknownHostException e) {
+            logger.error("Could not resolve address: {}", e.getMessage());
+            logger.debug("Exception resolving host address.", e);
+            return null;
+        }
         finally {
             radiusClient.close();
         }
@@ -258,6 +274,10 @@ public class RadiusConnectionService {
      * @param response
      *     The response phrase to send to the RADIUS server in response to the
      *     challenge previously provided.
+     * 
+     * @param clientAddress
+     *     The IP address of the client, if known, which will be set in as
+     *     the RADIUS client address.
      *
      * @param state
      *     The state data provided by the RADIUS server in order to continue
@@ -271,7 +291,7 @@ public class RadiusConnectionService {
      *     If an error is encountered trying to talk to the RADIUS server.
      */
     public RadiusPacket sendChallengeResponse(String username, String response,
-            byte[] state) throws GuacamoleException {
+            String clientAddress, byte[] state) throws GuacamoleException {
 
         if (username == null || username.isEmpty()) {
             logger.error("Challenge/response to RADIUS requires a username.");
@@ -288,7 +308,7 @@ public class RadiusConnectionService {
             return null;
         }
 
-        return authenticate(username,response,state);
+        return authenticate(username, response, clientAddress, state);
 
     }
 

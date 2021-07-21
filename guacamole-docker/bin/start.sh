@@ -354,9 +354,17 @@ END
         "postgresql-default-max-group-connections-per-user" \
         "$POSTGRES_DEFAULT_MAX_GROUP_CONNECTIONS_PER_USER"
 
+    set_optional_property                      \
+        "postgresql-default-statement-timeout" \
+        "$POSTGRES_DEFAULT_STATEMENT_TIMEOUT"
+
     set_optional_property          \
         "postgresql-user-required" \
         "$POSTGRES_USER_REQUIRED"
+
+    set_optional_property           \
+        "postgresql-socket-timeout" \
+        "$POSTGRES_SOCKET_TIMEOUT"
 
     set_optional_property      \
         "postgresql-ssl-mode"  \
@@ -413,34 +421,26 @@ END
     fi
 
     # Update config file
-    set_property          "ldap-hostname"           "$LDAP_HOSTNAME"
-    set_optional_property "ldap-port"               "$LDAP_PORT"
-    set_optional_property "ldap-encryption-method"  "$LDAP_ENCRYPTION_METHOD"
-    set_optional_property "ldap-max-search-results" "$LDAP_MAX_SEARCH_RESULTS"
-    set_optional_property "ldap-search-bind-dn"     "$LDAP_SEARCH_BIND_DN"
+    set_property          "ldap-hostname"                   "$LDAP_HOSTNAME"
+    set_property          "ldap-user-base-dn"               "$LDAP_USER_BASE_DN"
 
-    set_optional_property           \
-        "ldap-search-bind-password" \
-        "$LDAP_SEARCH_BIND_PASSWORD"
-
-    set_property          "ldap-user-base-dn"       "$LDAP_USER_BASE_DN"
-    set_optional_property "ldap-username-attribute" "$LDAP_USERNAME_ATTRIBUTE"
-    set_optional_property "ldap-member-attribute"   "$LDAP_MEMBER_ATTRIBUTE"
-    set_optional_property "ldap-user-search-filter" "$LDAP_USER_SEARCH_FILTER"
-    set_optional_property "ldap-config-base-dn"     "$LDAP_CONFIG_BASE_DN"
-    set_optional_property "ldap-group-base-dn"      "$LDAP_GROUP_BASE_DN"
-
-    set_optional_property           \
-        "ldap-group-name-attribute" \
-        "$LDAP_GROUP_NAME_ATTRIBUTE"
-
-    set_optional_property           \
-        "ldap-dereference-aliases"  \
-        "$LDAP_DEREFERENCE_ALIASES"
-
-    set_optional_property "ldap-follow-referrals"   "$LDAP_FOLLOW_REFERRALS"
-    set_optional_property "ldap-max-referral-hops"  "$LDAP_MAX_REFERRAL_HOPS"
-    set_optional_property "ldap-operation-timeout"  "$LDAP_OPERATION_TIMEOUT"
+    set_optional_property "ldap-port"                       "$LDAP_PORT"
+    set_optional_property "ldap-encryption-method"          "$LDAP_ENCRYPTION_METHOD"
+    set_optional_property "ldap-max-search-results"         "$LDAP_MAX_SEARCH_RESULTS"
+    set_optional_property "ldap-search-bind-dn"             "$LDAP_SEARCH_BIND_DN"
+    set_optional_property "ldap-user-attributes"            "$LDAP_USER_ATTRIBUTES"
+    set_optional_property "ldap-search-bind-password"       "$LDAP_SEARCH_BIND_PASSWORD"
+    set_optional_property "ldap-username-attribute"         "$LDAP_USERNAME_ATTRIBUTE"
+    set_optional_property "ldap-member-attribute"           "$LDAP_MEMBER_ATTRIBUTE"
+    set_optional_property "ldap-user-search-filter"         "$LDAP_USER_SEARCH_FILTER"
+    set_optional_property "ldap-config-base-dn"             "$LDAP_CONFIG_BASE_DN"
+    set_optional_property "ldap-group-base-dn"              "$LDAP_GROUP_BASE_DN"
+    set_optional_property "ldap-member-attribute-type"      "$LDAP_MEMBER_ATTRIBUTE_TYPE"
+    set_optional_property "ldap-group-name-attribute"       "$LDAP_GROUP_NAME_ATTRIBUTE"
+    set_optional_property "ldap-dereference-aliases"        "$LDAP_DEREFERENCE_ALIASES"
+    set_optional_property "ldap-follow-referrals"           "$LDAP_FOLLOW_REFERRALS"
+    set_optional_property "ldap-max-referral-hops"          "$LDAP_MAX_REFERRAL_HOPS"
+    set_optional_property "ldap-operation-timeout"          "$LDAP_OPERATION_TIMEOUT"
 
     # Add required .jar files to GUACAMOLE_EXT
     ln -s /opt/guacamole/ldap/guacamole-auth-*.jar "$GUACAMOLE_EXT"
@@ -586,6 +586,21 @@ END
 }
 
 ##
+## Adds properties to guacamole.properties which configure the TOTP two-factor
+## authentication mechanism.
+##
+associate_totp() {
+    # Update config file
+    set_optional_property "totp-issuer"    "$TOTP_ISSUER"
+    set_optional_property "totp-digits"    "$TOTP_DIGITS"
+    set_optional_property "totp-period"    "$TOTP_PERIOD"
+    set_optional_property "totp-mode"      "$TOTP_MODE"
+
+    # Add required .jar files to GUACAMOLE_EXT
+    ln -s /opt/guacamole/totp/guacamole-auth-*.jar   "$GUACAMOLE_EXT"
+}
+
+##
 ## Adds properties to guacamole.properties which configure the Duo two-factor
 ## authentication service. Checks to see if all variables are defined and makes sure
 ## DUO_APPLICATION_KEY is >= 40 characters.
@@ -622,6 +637,54 @@ END
 
     # Add required .jar files to GUACAMOLE_EXT
     ln -s /opt/guacamole/duo/guacamole-auth-*.jar   "$GUACAMOLE_EXT"
+}
+
+##
+## Adds properties to guacamole.properties which configure the header
+## authentication provider.
+##
+associate_header() {
+    # Update config file
+    set_optional_property "http-auth-header"         "$HTTP_AUTH_HEADER"
+
+    # Add required .jar files to GUACAMOLE_EXT
+    ln -s /opt/guacamole/header/guacamole-auth-*.jar "$GUACAMOLE_EXT"
+}
+
+##
+## Adds properties to guacamole.properties witch configure the CAS
+## authentication service.
+##
+associate_cas() {
+    # Verify required parameters are present
+    if [ -z "$CAS_AUTHORIZATION_ENDPOINT" ] || \
+       [ -z "$CAS_REDIRECT_URI" ]
+    then
+        cat <<END
+FATAL: Missing required environment variables
+-----------------------------------------------------------------------------------
+If using the CAS authentication extension, you must provide each of the
+following environment variables:
+
+    CAS_AUTHORIZATION_ENDPOINT      The URL of the CAS authentication server.
+
+    CAS_REDIRECT_URI                The URI to redirect back to upon successful authentication.
+
+END
+        exit 1;
+    fi
+
+    # Update config file
+    set_property            "cas-authorization-endpoint"       "$CAS_AUTHORIZATION_ENDPOINT"
+    set_property            "cas-redirect-uri"                 "$CAS_REDIRECT_URI"
+    set_optional_property   "cas-clearpass-key"                "$CAS_CLEARPASS_KEY"
+    set_optional_property   "cas-group-attribute"              "$CAS_GROUP_ATTRIBUTE"
+    set_optional_property   "cas-group-format"                 "$CAS_GROUP_FORMAT"
+    set_optional_property   "cas-group-ldap-base-dn"           "$CAS_GROUP_LDAP_BASE_DN"
+    set_optional_property   "cas-group-ldap-attribute"         "$CAS_GROUP_LDAP_ATTRIBUTE"
+
+    # Add required .jar files to GUACAMOLE_EXT
+    ln -s /opt/guacamole/cas/guacamole-auth-*.jar   "$GUACAMOLE_EXT"
 }
 
 ##
@@ -772,9 +835,24 @@ END
     exit 1;
 fi
 
+# Use TOTP if specified.
+if [ "$TOTP_ENABLED" = "true" ]; then
+    associate_totp
+fi
+
 # Use Duo if specified.
 if [ -n "$DUO_API_HOSTNAME" ]; then
     associate_duo
+fi
+
+# Use header if specified.
+if [ "$HEADER_ENABLED" = "true" ]; then
+    associate_header
+fi
+
+# Use CAS if specified.
+if [ -n "$CAS_AUTHORIZATION_ENDPOINT" ]; then
+    associate_cas
 fi
 
 # Set logback level if specified
