@@ -32,7 +32,6 @@ import org.apache.guacamole.auth.jdbc.base.ModeledDirectoryObjectMapper;
 import org.apache.guacamole.auth.jdbc.base.ModeledDirectoryObjectService;
 import org.apache.guacamole.GuacamoleClientException;
 import org.apache.guacamole.GuacamoleException;
-import org.apache.guacamole.GuacamoleSecurityException;
 import org.apache.guacamole.GuacamoleUnsupportedException;
 import org.apache.guacamole.auth.jdbc.base.ActivityRecordModel;
 import org.apache.guacamole.auth.jdbc.base.ActivityRecordSearchTerm;
@@ -46,12 +45,13 @@ import org.apache.guacamole.auth.jdbc.security.PasswordEncryptionService;
 import org.apache.guacamole.auth.jdbc.security.PasswordPolicyService;
 import org.apache.guacamole.form.Field;
 import org.apache.guacamole.form.PasswordField;
+import org.apache.guacamole.language.TranslatableGuacamoleClientException;
+import org.apache.guacamole.language.TranslatableGuacamoleInsufficientCredentialsException;
 import org.apache.guacamole.net.auth.ActivityRecord;
 import org.apache.guacamole.net.auth.AuthenticatedUser;
 import org.apache.guacamole.net.auth.AuthenticationProvider;
 import org.apache.guacamole.net.auth.User;
 import org.apache.guacamole.net.auth.credentials.CredentialsInfo;
-import org.apache.guacamole.net.auth.credentials.GuacamoleInsufficientCredentialsException;
 import org.apache.guacamole.net.auth.permission.ObjectPermission;
 import org.apache.guacamole.net.auth.permission.ObjectPermissionSet;
 import org.apache.guacamole.net.auth.permission.SystemPermission;
@@ -259,7 +259,19 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
             ModeledUser object, UserModel model) throws GuacamoleException {
 
         super.beforeUpdate(user, object, model);
-        
+
+        // Refuse to update if the user is a skeleton and does not actually
+        // exist in the database (this will happen if the user is authenticated
+        // via a non-database authentication provider)
+        if (object.isSkeleton()) {
+            logger.info("Data cannot be stored for user \"{}\" as they do not "
+                    + "have an account within the database. If this is "
+                    + "unexpected, consider allowing automatic creation of "
+                    + "user accounts.", object.getIdentifier());
+            throw new GuacamoleUnsupportedException("User does not exist "
+                    + "within the database and cannot be updated.");
+        }
+
         // Username must not be blank
         if (model.getIdentifier() == null || model.getIdentifier().trim().isEmpty())
             throw new GuacamoleClientException("The username must not be blank.");
@@ -277,8 +289,8 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
         // Verify new password does not violate defined policies (if specified)
         if (object.getPassword() != null) {
 
-            // Enforce password age only for non-adminstrators
-            if (!user.getUser().isAdministrator())
+            // Enforce password age only for non-privileged users
+            if (!user.isPrivileged())
                 passwordPolicyService.verifyPasswordAge(object);
 
             // Always verify password complexity
@@ -295,8 +307,9 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
     protected Collection<ObjectPermissionModel>
         getImplicitPermissions(ModeledAuthenticatedUser user, UserModel model) {
             
-        // Get original set of implicit permissions
-        Collection<ObjectPermissionModel> implicitPermissions = super.getImplicitPermissions(user, model);
+        // Get original set of implicit permissions and make a copy
+        Collection<ObjectPermissionModel> implicitPermissions =
+                new ArrayList<>(super.getImplicitPermissions(user, model));
         
         // Grant implicit permissions to the new user
         for (ObjectPermission.Type permissionType : IMPLICIT_USER_PERMISSIONS) {
@@ -311,7 +324,7 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
             
         }
         
-        return implicitPermissions;
+        return Collections.unmodifiableCollection(implicitPermissions);
     }
         
     @Override
@@ -406,11 +419,8 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
         if (authenticatedUser instanceof ModeledAuthenticatedUser)
             return ((ModeledAuthenticatedUser) authenticatedUser).getUser();
 
-        // Get username
-        String username = authenticatedUser.getIdentifier();
-
         // Retrieve corresponding user model, if such a user exists
-        UserModel userModel = userMapper.selectOne(username);
+        UserModel userModel = userMapper.selectOne(authenticatedUser.getIdentifier());
         if (userModel == null)
             return null;
 
@@ -494,20 +504,25 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
         // Require new password if account is expired
         if (newPassword == null || confirmNewPassword == null) {
             logger.info("The password of user \"{}\" has expired and must be reset.", username);
-            throw new GuacamoleInsufficientCredentialsException("LOGIN.INFO_PASSWORD_EXPIRED", EXPIRED_PASSWORD);
+            throw new TranslatableGuacamoleInsufficientCredentialsException("Password has expired",
+                    "LOGIN.INFO_PASSWORD_EXPIRED", EXPIRED_PASSWORD);
         }
 
         // New password must be different from old password
         if (newPassword.equals(credentials.getPassword()))
-            throw new GuacamoleClientException("LOGIN.ERROR_PASSWORD_SAME");
+            throw new TranslatableGuacamoleClientException("New passwords may "
+                    + "not be identical to the current password if password "
+                    + "reset is required.", "LOGIN.ERROR_PASSWORD_SAME");
 
         // New password must not be blank
         if (newPassword.isEmpty())
-            throw new GuacamoleClientException("LOGIN.ERROR_PASSWORD_BLANK");
+            throw new TranslatableGuacamoleClientException("Passwords may not "
+                    + "be blank.", "LOGIN.ERROR_PASSWORD_BLANK");
 
         // Confirm that the password was entered correctly twice
         if (!newPassword.equals(confirmNewPassword))
-            throw new GuacamoleClientException("LOGIN.ERROR_PASSWORD_MISMATCH");
+            throw new TranslatableGuacamoleClientException("New password does "
+                    + "not match.", "LOGIN.ERROR_PASSWORD_MISMATCH");
 
         // Verify new password does not violate defined policies
         passwordPolicyService.verifyPassword(username, newPassword);
@@ -577,13 +592,9 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
             ModeledUser user) throws GuacamoleException {
 
         String username = user.getIdentifier();
-
-        // Retrieve history only if READ permission is granted
-        if (hasObjectPermission(authenticatedUser, username, ObjectPermission.Type.READ))
-            return getObjectInstances(userRecordMapper.select(username));
-
-        // The user does not have permission to read the history
-        throw new GuacamoleSecurityException("Permission denied.");
+        
+        return retrieveHistory(username, authenticatedUser, Collections.emptyList(),
+                Collections.emptyList(), Integer.MAX_VALUE);
 
     }
 
@@ -593,6 +604,59 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
      * given terms and sorted by the given predicates. Only history records
      * associated with data that the given user can read are returned.
      *
+     * @param username
+     *     The optional username to which history records should be limited, or
+     *     null if all readable records should be retrieved.
+     * 
+     * @param user
+     *     The user retrieving the login history.
+     *
+     * @param requiredContents
+     *     The search terms that must be contained somewhere within each of the
+     *     returned records.
+     *
+     * @param sortPredicates
+     *     A list of predicates to sort the returned records by, in order of
+     *     priority.
+     *
+     * @param limit
+     *     The maximum number of records that should be returned.
+     *
+     * @return
+     *     The login history of the given user, including any active sessions.
+     *
+     * @throws GuacamoleException
+     *     If permission to read the user login history is denied.
+     */
+    public List<ActivityRecord> retrieveHistory(String username,
+            ModeledAuthenticatedUser user,
+            Collection<ActivityRecordSearchTerm> requiredContents,
+            List<ActivityRecordSortPredicate> sortPredicates, int limit)
+            throws GuacamoleException {
+
+        List<ActivityRecordModel> searchResults;
+
+        // Bypass permission checks if the user is privileged
+        if (user.isPrivileged())
+            searchResults = userRecordMapper.search(username, requiredContents,
+                    sortPredicates, limit);
+
+        // Otherwise only return explicitly readable history records
+        else
+            searchResults = userRecordMapper.searchReadable(username, 
+                    user.getUser().getModel(),
+                    requiredContents, sortPredicates, limit, user.getEffectiveUserGroups());
+
+        return getObjectInstances(searchResults);
+
+    }
+    
+    /**
+     * Retrieves user login history records matching the given criteria.
+     * Retrieves up to <code>limit</code> user history records matching the
+     * given terms and sorted by the given predicates. Only history records
+     * associated with data that the given user can read are returned.
+     * 
      * @param user
      *     The user retrieving the login history.
      *
@@ -617,21 +681,9 @@ public class UserService extends ModeledDirectoryObjectService<ModeledUser, User
             Collection<ActivityRecordSearchTerm> requiredContents,
             List<ActivityRecordSortPredicate> sortPredicates, int limit)
             throws GuacamoleException {
-
-        List<ActivityRecordModel> searchResults;
-
-        // Bypass permission checks if the user is a system admin
-        if (user.getUser().isAdministrator())
-            searchResults = userRecordMapper.search(requiredContents,
-                    sortPredicates, limit);
-
-        // Otherwise only return explicitly readable history records
-        else
-            searchResults = userRecordMapper.searchReadable(user.getUser().getModel(),
-                    requiredContents, sortPredicates, limit, user.getEffectiveUserGroups());
-
-        return getObjectInstances(searchResults);
-
+        
+        return retrieveHistory(null, user, requiredContents, sortPredicates, limit);
+        
     }
 
 }
