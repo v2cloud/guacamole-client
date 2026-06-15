@@ -544,7 +544,7 @@ Guacamole.Display = function() {
 
     /**
      * Returns the height of this display.
-     * 
+     *
      * @return {!number}
      *     The height of this display;
      */
@@ -755,8 +755,15 @@ Guacamole.Display = function() {
     };
 
     /**
-     * Set the current monitor size.
-     * 
+     * Set the current monitor size. When set, subsequent default-layer
+     * resize requests are clamped to these dimensions so this window's
+     * canvas represents only one monitor of a multi-monitor remote
+     * desktop. The server is responsible for ensuring that drawing
+     * operations transmitted to this client target this monitor's
+     * region (cross-monitor copy operations are decomposed server-side
+     * into image transmissions, so the client never needs source pixels
+     * from a different monitor's canvas).
+     *
      * @param {!number} width
      *     The width of the monitor, in pixels.
      * @param {!number} height
@@ -784,13 +791,18 @@ Guacamole.Display = function() {
     this.resize = function(layer, width, height) {
         scheduleTask(function __display_resize() {
 
-            // Adjust width when using multiple monitors
-            if (monitorWidth)
-                width = monitorWidth;
+            // Adjust dimensions of the default layer only when this window
+            // represents a single monitor of a multi-monitor desktop;
+            // buffers and child layers must keep their requested size
+            if (layer === default_layer) {
 
-            // Adjust height when using multiple monitors
-            if (monitorHeight)
-                height = monitorHeight;
+                if (monitorWidth)
+                    width = monitorWidth;
+
+                if (monitorHeight)
+                    height = monitorHeight;
+
+            }
 
             layer.resize(width, height);
 

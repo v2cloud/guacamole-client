@@ -123,8 +123,14 @@ Guacamole.Mouse = function Mouse(element) {
         Guacamole.Event.DOMEvent.cancelEvent(e);
     }, false);
 
-    // Capture mouse events outside the display element when a button is
-    // pressed to allow drag and drop between multiple windows.
+    // Capture the pointer while a button is held so mouse events continue
+    // to be delivered after the cursor leaves the element. Without this, a
+    // drag started with a button held stops receiving events at the window
+    // edge, causing the remote desktop to see the button stall and cancel
+    // the drag. This prevents dragging an application from one monitor's
+    // window into another's. During capture, clientX/Y continue to report
+    // coordinates relative to this window, which the multi-monitor offset
+    // math translates correctly.
     element.addEventListener("pointerdown", function(e) {
         element.setPointerCapture(e.pointerId);
     }, false);

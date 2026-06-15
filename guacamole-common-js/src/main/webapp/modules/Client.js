@@ -159,12 +159,12 @@ Guacamole.Client = function(tunnel) {
     }
 
     /**
-     * Add optional X offset on defaut layer draw actions.
+     * The X offset applied to draw operations on the default layer.
      */
     this.offsetX = 0;
 
     /**
-     * Add optional Y offset on defaut layer draw actions.
+     * The Y offset applied to draw operations on the default layer.
      */
     this.offsetY = 0;
 
@@ -327,27 +327,47 @@ Guacamole.Client = function(tunnel) {
     };
 
     /**
-     * Sends the current size of the screen.
-     * 
+     * Sends the current size of a monitor in a (potentially multi-monitor)
+     * remote desktop.
+     *
      * @param {!number} width
-     *     The width of the screen.
+     *     The width of this monitor, in pixels.
      *
      * @param {!number} height
-     *     The height of the screen.
-     * 
-     * @param {!number} x_position
-     *     The x position of the screen (relative to the main window).
+     *     The height of this monitor, in pixels.
      *
-     * @param {!number} top_offset
-     *     The top offset of the screen, in pixel.
+     * @param {number} [x_position=0]
+     *     The position of this monitor in the layout. 0 = primary.
+     *
+     * @param {number} [top_offset=0]
+     *     The vertical offset of this monitor from the primary's top
+     *     edge, in pixels. Negative values are allowed (monitor above
+     *     primary).
+     *
+     * @param {number} [left_offset]
+     *     The horizontal offset of this monitor within the combined
+     *     desktop, in pixels. Negative values are allowed (monitor to
+     *     the left of primary). When omitted, the server falls back to
+     *     a horizontal-row layout based on x_position. Provide an
+     *     explicit value (including 0 for the primary) to enable
+     *     non-linear monitor arrangements such as portrait-above,
+     *     secondary-left-of-primary, or L-shaped layouts.
      */
-    this.sendSize = function sendSize(width, height, x_position, top_offset) {
+    this.sendSize = function sendSize(width, height, x_position, top_offset,
+            left_offset) {
 
         // Do not send requests if not connected
         if (!isConnected())
             return;
 
-        tunnel.sendMessage("size", width, height, x_position, top_offset);
+        // Include left_offset only when explicitly provided. When omitted, the
+        // server applies a horizontal-row layout based on x_position; servers
+        // that predate this argument ignore the extra value harmlessly.
+        if (left_offset !== undefined)
+            tunnel.sendMessage("size", width, height, x_position, top_offset,
+                    left_offset);
+        else
+            tunnel.sendMessage("size", width, height, x_position, top_offset);
 
     };
 
@@ -392,7 +412,7 @@ Guacamole.Client = function(tunnel) {
 
         // The offset is already applied when the state comes from a
         // secondary monitor
-        if (!mouseState.offsedProcessed) {
+        if (!mouseState.offsetProcessed) {
             x += guac_client.offsetX;
             y += guac_client.offsetY;
         }
@@ -764,9 +784,9 @@ Guacamole.Client = function(tunnel) {
     this.ondisconnect = null;
 
     /**
-     * Fired when guacd send instructions to transfer them on additional
-     * monitors windows.
-     * 
+     * Fired when an instruction is received from the server, allowing it to
+     * be relayed to any additional monitor windows.
+     *
      * @event
      * @param {!string} opcode
      *     The current operation code.
@@ -1736,7 +1756,7 @@ Guacamole.Client = function(tunnel) {
             const offsetY = parseInt(parameters[0]) === 0 ? guac_client.offsetY : 0;
 
             const layer = getLayer(parseInt(parameters[0]));
-            const x = parseInt(parameters[0]) - offsetX;
+            const x = parseInt(parameters[1]) - offsetX;
             const y = parseInt(parameters[2]) - offsetY;
 
             display.moveTo(layer, x, y);
