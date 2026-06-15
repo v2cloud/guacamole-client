@@ -281,6 +281,13 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // Calculate optimal width/height for display
         const pixel_density = $window.devicePixelRatio || 1;
         const optimal_dpi = pixel_density * 96;
+
+        /* Pin the session DPR to the value guacd uses for the whole session,
+         * the floored GUAC_DPI below divided by 96, so client-side
+         * committed-space math stays aligned with the server's even when the
+         * window later moves to a monitor with a different DPI or the zoom
+         * changes. */
+        guacManageMonitor.setSessionDpr(Math.floor(optimal_dpi) / 96);
         const optimal_width = width * pixel_density;
         const optimal_height = height * pixel_density;
 
@@ -900,7 +907,13 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         var model = {};
 
         angular.forEach(client.arguments, function addModelEntry(managedArgument) {
-            model[managedArgument.name] = managedArgument.value;
+
+            /* The arguments map also stores raw string values for
+             * immutable parameters; only mutable ManagedArgument
+             * instances belong in the editable model. */
+            if (managedArgument instanceof ManagedArgument)
+                model[managedArgument.name] = managedArgument.value;
+
         });
 
         return model;
