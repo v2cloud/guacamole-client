@@ -1,0 +1,501 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+/* =====================================================================
+ * Configure Monitor Layout — styled to match Guacamole's own UI.
+ *
+ * Guacamole's design language (extracted from app/index/styles/buttons.css and
+ * client/styles/menu.css): the Carlito font; LIGHT panels (#EEE/white) with
+ * dark text like the slide-out menu; flat, square, dark-gray buttons (#3C3C3C
+ * → hover #5A5A5A → active #2C2C2C, white bold text) which we INHERIT from the
+ * global button styles; #5af blue as the focus/selection accent; #A43 red for
+ * danger. The arrangement canvas is the one intentionally dark surface — a
+ * recessed "screen preview", the standard idiom for display-arrangement panels.
+ *
+ * Selectors + inline tile geometry (left/top/width/height) are preserved so
+ * the unit/E2E suites and dragging are unaffected.
+ * ===================================================================== */
+
+.monitor-layout-editor {
+    --g-font:   Carlito, FreeSans, Helvetica, Arial, sans-serif;
+    --g-mono:   ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+
+    --g-panel:  #f4f4f4;
+    --g-panel-2:#ffffff;
+    --g-ink:    #333333;
+    --g-muted:  #666666;
+    --g-faint:  #888888;
+    --g-line:   rgba(0, 0, 0, 0.18);
+    --g-line-soft: rgba(0, 0, 0, 0.08);
+
+    --g-accent: #5af;          /* Guacamole focus/selection blue */
+    --g-primary:#3161a9;       /* Guacamole blue — primary monitor */
+    --g-canvas: #34383d;       /* recessed screen-preview surface */
+
+    --g-warn-bg:   #fff8dc;
+    --g-warn-line: #d8a200;
+    --g-warn-ink:  #7a5a00;
+
+    box-sizing: border-box;
+    /* Wider than the original 900px so many-monitor layouts (e.g. 6+ 2K
+     * secondaries) have room to render at a legible scale. */
+    width: min(1040px, 95vw);
+    margin: 0 auto;
+    /* Flex column: a scrollable .mle-body + a pinned .footer. Bounding the
+     * height here (and scrolling INSIDE) keeps the footer a flex sibling below
+     * the body — it can never float over the canvas, even when the content is
+     * taller than the viewport (150% / HiDPI). Padding now lives on the body
+     * and footer. */
+    display: flex;
+    flex-direction: column;
+    max-height: 92vh;
+    padding: 0;
+    color: var(--g-ink);
+    font-family: var(--g-font);
+    background: var(--g-panel);
+    border: 1px solid rgba(0, 0, 0, 0.4);
+    border-radius: 3px;
+    box-shadow: inset 0 1px 0 #ffffff, 0 6px 24px rgba(0, 0, 0, 0.45);
+    animation: mle-rise 0.14s ease-out both;
+}
+
+/* The only scroll region. The footer sits BELOW this (outside it), so it never
+ * overlaps the canvas/tools. */
+.monitor-layout-editor .mle-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 1.25em 1.4em 1.25em;
+}
+
+.monitor-layout-editor * { box-sizing: border-box; }
+
+@keyframes mle-rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* ---- Header ---- */
+.monitor-layout-editor h2 {
+    margin: 0 0 0.15em 0;
+    /* Reset all sides (shorthand) so a global dialog-heading rule can't add a
+     * left padding that indents the title past the instructions/canvas below. */
+    padding: 0 0 0.4em 0;
+    border-bottom: 1px solid var(--g-line);
+    font-size: 1.3em;
+    font-weight: bold;
+    color: var(--g-ink);
+}
+
+.monitor-layout-editor .instructions {
+    margin: 0.7em 0 1em 0;
+    color: var(--g-muted);
+    font-size: 0.85em;
+    line-height: 1.5;
+    /* Span the full modal width rather than wrapping at half. */
+    max-width: none;
+}
+
+/* ---- Canvas region: holds the viewport + the overlaid zoom toolbar ---- */
+.monitor-layout-editor .canvas-region {
+    position: relative;
+}
+
+/* ---- Canvas (recessed screen preview = a pan/zoom VIEWPORT) ---- */
+.monitor-layout-editor .layout-canvas {
+    position: relative;
+    /* Fill the modal width; the directive measures this element's rendered
+     * width and scales the layout to fit. Height is set inline (ng-style) from
+     * the layout's aspect ratio. */
+    width: 100%;
+    margin: 0 auto;
+    user-select: none;
+    /* Clip to the viewport: a screen dragged toward an edge slides off rather
+     * than spilling over the rest of the modal — zoom out / pan to reach it. */
+    overflow: hidden;
+    /* Empty space is grabbable to pan the view. */
+    cursor: grab;
+    border-radius: 3px;
+    background-color: var(--g-canvas);
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+    background-size: 25px 25px;
+    background-position: center center;
+    border: 1px solid rgba(0, 0, 0, 0.45);
+    box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+.monitor-layout-editor .layout-canvas.is-panning { cursor: grabbing; }
+
+/* ---- On-canvas tool pills (overlaid at the BOTTOM of the canvas) ----
+ * BOTTOM-LEFT  = Add Screen (opens a real monitor — kept apart).
+ * BOTTOM-RIGHT = safe reflow/view tools: Reset, Fit, zoom.
+ * The bottom is safe again: the footer is now pinned OUTSIDE the scrollable
+ * body (not sticky), so it never floats over the canvas — and these sit right
+ * above the Screen Positions table, visible together. */
+.monitor-layout-editor .canvas-tools {
+    position: absolute;
+    bottom: 8px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 4px;
+    background: rgba(28, 30, 33, 0.82);
+    border: 1px solid rgba(0, 0, 0, 0.5);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.monitor-layout-editor .canvas-tools-left { left: 8px; }
+.monitor-layout-editor .zoom-toolbar      { right: 8px; }
+
+/* Icon buttons — uniform square, native Guacamole flat dark-gray. */
+.monitor-layout-editor .canvas-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 24px;
+    padding: 0;
+    color: #e8e8e8;
+    background: #3c3c3c;
+    border: 1px solid rgba(0, 0, 0, 0.5);
+    border-radius: 3px;
+    cursor: pointer;
+}
+.monitor-layout-editor .canvas-btn:hover  { background: #5a5a5a; }
+.monitor-layout-editor .canvas-btn:active { background: #2c2c2c; }
+.monitor-layout-editor .canvas-btn:disabled { opacity: 0.4; cursor: default; }
+.monitor-layout-editor .canvas-btn svg { display: block; pointer-events: none; }
+
+.monitor-layout-editor .zoom-sep {
+    width: 1px;
+    height: 16px;
+    margin: 0 3px;
+    background: rgba(255, 255, 255, 0.18);
+}
+.monitor-layout-editor .zoom-readout {
+    min-width: 3.2em;
+    text-align: center;
+    font-family: var(--g-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.78em;
+    color: #d8d8d8;
+}
+
+/* ---- Monitor tiles ---- */
+.monitor-layout-editor .monitor-tile {
+    position: absolute;
+    box-sizing: border-box;
+    cursor: move;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1em;
+    text-align: center;
+    /* Keep labels contained on small tiles (many-monitor layouts shrink
+     * tiles); text is clipped rather than spilling over neighbours. */
+    overflow: hidden;
+    border-radius: 0;                    /* square screens */
+    color: #ffffff;
+    font-size: 0.82em;
+    background: #5a6675;                 /* secondary monitors: neutral slate */
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.18),
+        0 1px 3px rgba(0, 0, 0, 0.5);
+    text-shadow: -1px -1px rgba(0, 0, 0, 0.3);
+    /* Only non-geometry properties transition — dragging stays pixel-crisp. */
+    transition: box-shadow 0.12s, border-color 0.12s, filter 0.12s, background 0.12s;
+}
+
+.monitor-layout-editor .monitor-tile:hover {
+    filter: brightness(1.08);
+    border-color: rgba(255, 255, 255, 0.6);
+}
+
+.monitor-layout-editor .monitor-tile.is-primary {
+    background: var(--g-primary);        /* Guacamole blue anchor */
+    border-color: #7ab0f0;
+}
+
+.monitor-layout-editor .monitor-tile.is-dragging {
+    cursor: grabbing;
+    z-index: 10;
+    filter: brightness(1.08);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.2),
+        0 4px 12px rgba(0, 0, 0, 0.6),
+        0 0 0 2px var(--g-accent);
+}
+
+.monitor-layout-editor .monitor-tile.is-selected {
+    z-index: 5;
+    border-color: var(--g-accent);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.2),
+        0 1px 3px rgba(0, 0, 0, 0.5),
+        0 0 0 2px var(--g-accent);
+}
+
+.monitor-layout-editor .monitor-tile.is-warning {
+    border-color: var(--g-warn-line);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.15),
+        0 1px 3px rgba(0, 0, 0, 0.5),
+        0 0 0 2px rgba(216, 162, 0, 0.65);
+}
+
+.monitor-layout-editor .tile-label { font-weight: bold; }
+
+.monitor-layout-editor .tile-dim {
+    font-family: var(--g-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.72em;
+    color: rgba(255, 255, 255, 0.75);
+    text-shadow: none;
+}
+
+.monitor-layout-editor .tile-warn {
+    position: absolute;
+    top: 0.2em;
+    right: 0.3em;
+    font-size: 0.95em;
+    color: #ffe08a;
+}
+
+/* ---- Coordinates table ---- */
+.monitor-layout-editor .preview {
+    margin-top: 1em;
+    background: var(--g-panel-2);
+    padding: 0.75em 0.9em 0.6em;
+    border: 1px solid var(--g-line);
+    border-radius: 3px;
+}
+
+.monitor-layout-editor .preview h3 {
+    margin: 0;
+    font-size: 0.95em;
+    font-weight: bold;
+    color: var(--g-ink);
+}
+
+.monitor-layout-editor .coord-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.6em;
+    font-size: 0.88em;
+}
+
+.monitor-layout-editor .coord-table thead th {
+    text-align: left;
+    padding: 0.3em 0.55em 0.4em;
+    color: var(--g-faint);
+    font-weight: bold;
+    font-size: 0.85em;
+    border-bottom: 1px solid var(--g-line);
+}
+.monitor-layout-editor .coord-table thead tr:first-child th:last-child {
+    color: var(--g-primary);
+}
+
+.monitor-layout-editor .coord-table tbody td {
+    padding: 0.35em 0.55em;
+    border-bottom: 1px solid var(--g-line-soft);
+    color: var(--g-ink);
+    font-family: var(--g-mono);
+    font-variant-numeric: tabular-nums;
+}
+.monitor-layout-editor .coord-table tbody tr:last-child td { border-bottom: 0; }
+.monitor-layout-editor .coord-table tbody td:first-child {
+    font-family: var(--g-font);
+    color: var(--g-muted);
+}
+
+.monitor-layout-editor .coord-table tr.is-warning td { background: var(--g-warn-bg); }
+.monitor-layout-editor .coord-table tr.is-warning td:first-child {
+    box-shadow: inset 3px 0 0 var(--g-warn-line);
+    color: var(--g-warn-ink);
+}
+
+.monitor-layout-editor .coord-input {
+    width: 5.2em;
+    background: var(--g-panel-2);
+    color: var(--g-ink);
+    border: 1px solid #aaaaaa;
+    padding: 0.2em 0.4em;
+    border-radius: 2px;
+    font-family: var(--g-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+    text-align: right;
+}
+.monitor-layout-editor .coord-input:focus {
+    outline: none;
+    border-color: var(--g-accent);
+    box-shadow: 0 0 0 2px rgba(85, 170, 255, 0.35);
+}
+
+.monitor-layout-editor .coord-table td.rendered {
+    color: var(--g-primary);
+    text-align: left;          /* align under the left-aligned column headers */
+    min-width: 3.4em;
+}
+
+/* ---- Warnings (Guacamole light warning style) ---- */
+.monitor-layout-editor .warnings {
+    margin-top: 0.8em;
+    background: var(--g-warn-bg);
+    border: 1px solid var(--g-warn-line);
+    border-left-width: 4px;
+    padding: 0.7em 0.85em;
+    border-radius: 2px;
+}
+.monitor-layout-editor .warning-msg {
+    margin: 0 0 0.15em 0;
+    color: var(--g-warn-ink);
+    font-size: 0.88em;
+    font-weight: bold;
+}
+.monitor-layout-editor .warning-msg::before { content: "\26A0"; margin-right: 0.4em; }
+.monitor-layout-editor .warning-hint {
+    margin: 0.4em 0 0 0;
+    color: #8a6d1f;
+    font-size: 0.8em;
+    line-height: 1.45;
+    font-weight: normal;
+}
+
+/* ---- Footer / actions ----
+ * The action buttons inherit Guacamole's global button styling (flat dark-gray,
+ * Carlito bold, square). We only lay them out and lightly emphasise the
+ * primary (Apply) with the brand blue. */
+.monitor-layout-editor .footer {
+    /* Pinned action bar: a flex sibling BELOW the scrollable .mle-body, so
+     * Apply / Close are always visible and the bar never floats over the canvas
+     * (it is outside the scroll region, not position:sticky). Side padding is
+     * its own now that the modal has none. */
+    flex: 0 0 auto;
+    padding: 0.75em 1.4em 0.9em;
+    border-top: 1px solid var(--g-line);
+    background: var(--g-panel);
+    display: flex;
+    align-items: center;
+    z-index: 2;
+}
+.monitor-layout-editor .footer-spacer { flex: 1 1 auto; }
+
+/* Modified-state status line. Blue = "you have pending changes" (kept distinct
+ * from amber, which means "invalid layout"). */
+.monitor-layout-editor .layout-status {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.82em;
+    color: var(--g-faint);
+}
+.monitor-layout-editor .layout-status .status-clean { color: var(--g-faint); }
+.monitor-layout-editor .layout-status .status-dirty {
+    color: var(--g-primary);
+    font-weight: bold;
+}
+/* Over-limit: the combined desktop exceeds guacd's surface cap and would
+   render white — Apply is blocked, so flag it distinctly from a clean dirty. */
+.monitor-layout-editor .layout-status .status-over-limit {
+    color: var(--g-warn-line);
+    font-weight: bold;
+}
+
+.monitor-layout-editor .apply-btn {
+    background-color: var(--g-primary);
+}
+.monitor-layout-editor .apply-btn:hover { background-color: #3d74c4; }
+.monitor-layout-editor .apply-btn:active { background-color: #28528c; }
+/* Clean: nothing to apply — subdued + non-interactive. */
+.monitor-layout-editor .apply-btn:disabled {
+    background-color: #8a8f96;
+    opacity: 0.6;
+    cursor: default;
+}
+/* Becoming dirty pulses Apply once to draw the eye to the resolving action. */
+.monitor-layout-editor .apply-btn.is-dirty { animation: mle-apply-pulse 0.45s ease-out; }
+@keyframes mle-apply-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(49, 97, 169, 0.55); }
+    100% { box-shadow: 0 0 0 8px rgba(49, 97, 169, 0); }
+}
+
+/* Changed row in the position table: a diff-style blue left gutter bar marks
+ * exactly which screens differ from what Windows currently has. It's a border
+ * (not a fill), so it coexists with the amber is-warning row background — a
+ * changed AND invalid row shows the blue bar over the amber fill. */
+.monitor-layout-editor .coord-table tbody tr.changed td:first-child {
+    box-shadow: inset 3px 0 0 var(--g-primary);
+}
+
+/* ---- Modal shell ---- */
+.layout-editor-modal {
+    position: fixed;
+    inset: 0;
+    /* Below guac-modal (z-index 10) so notifications raised while the
+     * editor is open — e.g. the maximum-desktop-size dialog — appear on
+     * top of it; above all regular client content. */
+    z-index: 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+}
+.layout-editor-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+}
+.layout-editor-container {
+    position: relative;
+    z-index: 1;
+    max-height: 92vh;
+    /* The modal itself is now the bounded flex-column scroller (its .mle-body
+     * scrolls); this wrapper must NOT also scroll, or the footer would scroll
+     * away with the content. */
+    overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .monitor-layout-editor { animation: none !important; }
+}
+
+/* ---- Menu launcher (unchanged behavior) ---- */
+#guac-menu #multi-monitor .configure-layout {
+    padding: 1em;
+    border: 1px solid rgba(0, 0, 0, 0.125);
+    background: rgba(0, 0, 0, 0.04);
+    padding-left: 3.5em;
+    background-size:         1.5em 1.5em;
+    -moz-background-size:    1.5em 1.5em;
+    -webkit-background-size: 1.5em 1.5em;
+    -khtml-background-size:  1.5em 1.5em;
+    background-repeat: no-repeat;
+    background-position: 1em center;
+    background-image: url('images/protocol-icons/guac-monitor.svg');
+}
+#guac-menu #multi-monitor .configure-layout:hover {
+    cursor: pointer;
+    border-color: black;
+}

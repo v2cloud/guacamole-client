@@ -41,6 +41,7 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
     const guacClientManager      = $injector.get('guacClientManager');
     const guacFullscreen         = $injector.get('guacFullscreen');
     const guacManageMonitor      = $injector.get('guacManageMonitor');
+    const guacNotification       = $injector.get('guacNotification');
     const iconService            = $injector.get('iconService');
     const preferenceService      = $injector.get('preferenceService');
     const requestService         = $injector.get('requestService');
@@ -501,10 +502,28 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
         $scope.menu.connectionParameters = newFocusedClient ?
             ManagedClient.getArgumentModel(newFocusedClient) : {};
 
-        // Set new focused client on guacManageMonitor
-        guacManageMonitor.setClient(newFocusedClient.client);
+        // Set new focused client on guacManageMonitor (newFocusedClient is
+        // null when no client is focused or multiple clients are focused)
+        if (newFocusedClient)
+            guacManageMonitor.setClient(newFocusedClient.client);
 
     });
+
+    /*
+     * Close all secondary monitors whenever the focused connection reaches a
+     * terminal state. The client.ondisconnect handler wired in setClient fires
+     * only for a clean disconnect or a server error instruction. A tunnel-level
+     * drop, such as a network cut or guacd restart, surfaces only as a
+     * connectionState change, which would otherwise leave the secondary windows
+     * open showing stale content. TUNNEL_UNSTABLE is excluded, as it recovers.
+     */
+    $scope.$watch('focusedClient.clientState.connectionState',
+        function connectionStateChanged(connectionState) {
+            if (connectionState === ManagedClientState.ConnectionState.DISCONNECTED
+             || connectionState === ManagedClientState.ConnectionState.TUNNEL_ERROR
+             || connectionState === ManagedClientState.ConnectionState.CLIENT_ERROR)
+                guacManageMonitor.closeAllMonitors();
+        });
 
     // Automatically update connection parameters that have been modified
     // for the current focused client
@@ -731,6 +750,46 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
     $scope.clientMenuActions = [ DISCONNECT_MENU_ACTION,FULLSCREEN_MENU_ACTION ];
 
     /**
+     * Returns the number of secondary monitors the focused connection permits.
+     * Fails closed, returning 0, when the protocol is not RDP, when multiple
+     * clients share the group, or when the parameter is missing or unparseable.
+     *
+     * @returns {!number}
+     *     The permitted number of secondary monitors.
+     */
+    function secondaryMonitorsAllowed() {
+
+        // Multi monitor only supported with rdp protocol
+        if ($scope.focusedClient?.protocol !== 'rdp')
+            return 0;
+
+        /* The arguments map holds ManagedArgument instances for mutable
+         * parameters and raw string values for immutable ones; accept
+         * either form. */
+        const rawAllowed = $scope.focusedClient.arguments['secondary-monitors'];
+        let allowed = parseInt(
+                (rawAllowed && typeof rawAllowed === 'object')
+                    ? rawAllowed.value : rawAllowed, 10);
+        if (isNaN(allowed))
+            allowed = 0;
+
+        // Allow secondary monitors only if there is a single client in the group
+        if ($scope.clientGroup && $scope.clientGroup.clients.length > 1)
+            allowed = 0;
+
+        return allowed;
+
+    }
+
+    /* Keep the service's monitor limit in sync with the connection's
+     * allowance. A $watch is used rather than a side effect inside the
+     * template-bound showAddMonitor() getter, so that digest-evaluated
+     * expressions remain free of side effects. */
+    $scope.$watch(secondaryMonitorsAllowed, function syncMaxSecondaryMonitors(allowed) {
+        guacManageMonitor.setMaxSecondaryMonitors(allowed);
+    });
+
+    /**
      * Show the section to add an additional monitor only on supported protocols
      * and when the functionality is enabled.
      *
@@ -738,30 +797,7 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
      *     true when user can use multi monitor, false otherwise.
      */
     $scope.showAddMonitor = function showAddMonitor() {
-
-        // Multi monitor only supported with rdp protocol
-        if ($scope.focusedClient?.protocol !== 'rdp')
-            return false;
-
-        // The maximum number of secondary monitors that can be added.
-        let secondaryMonitorsAllowed = parseInt(
-                $scope.focusedClient.arguments['secondary-monitors'] ?? 0);
-
-        // Allow secondary monitors only if there is a single client in the group
-        if ($scope.clientGroup.clients.length > 1)
-            secondaryMonitorsAllowed = 0;
-        
-        guacManageMonitor.setMaxSecondaryMonitors(secondaryMonitorsAllowed);
-
-        // Secondary monitors disabled
-        if (secondaryMonitorsAllowed < 1 || !guacManageMonitor.supported())
-            return false;
-
-        // Disable button when the limit is reached (still visible)
-        $scope.disableAddMonitor = guacManageMonitor.monitorLimitReached();
-
-        return true;
-        
+        return secondaryMonitorsAllowed() >= 1 && guacManageMonitor.supported();
     };
 
     /**
@@ -780,7 +816,8 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
         if (guacManageMonitor.monitorLimitReached())
             return;
 
-        // Add or remove additional monitor
+        // Add an additional monitor. guacManageMonitor.addMonitor refuses and
+        // notifies the user when there is no room within the surface size cap.
         guacManageMonitor.addMonitor();
 
         // Close menu
@@ -788,8 +825,206 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
 
     };
 
-    // Init guacManageMonitor
-    guacManageMonitor.init();
+    /**
+     * Whether the layout-editor modal is currently visible.
+     *
+     * @type {!boolean}
+     */
+    $scope.showLayoutEditor = false;
+
+    /**
+     * Returns true if the Configure Layout menu item should be available. The
+     * item is shown only when multi-monitor support is usable on the focused
+     * connection.
+     *
+     * @returns {!boolean}
+     */
+    $scope.canConfigureLayout = function canConfigureLayout() {
+        return $scope.focusedClient
+            && $scope.focusedClient.clientState.connectionState === 'CONNECTED'
+            // Available whenever multi-monitor is usable: either a secondary
+            // already exists, or one can be added. showAddMonitor() is true for
+            // RDP connections that permit secondary monitors. Permitting it with
+            // only the primary present lets the user add screens from inside the
+            // modal.
+            && (guacManageMonitor.getMonitorCount() > 1 || $scope.showAddMonitor());
+    };
+
+    /**
+     * Whether a screen can be added from the layout modal. True when the
+     * connection permits another secondary and the open-monitor limit has
+     * not been reached. The service's max-secondary limit is kept in sync
+     * by the secondaryMonitorsAllowed $watch above.
+     *
+     * @returns {!boolean}
+     */
+    $scope.canAddScreenFromLayout = function canAddScreenFromLayout() {
+        // Not gated on addRoomExhausted(): the button stays enabled so the
+        // click reaches guacManageMonitor.addMonitor(), which refuses and
+        // raises onExtentClamped() as a visible notification, rather than
+        // failing silently behind a disabled button.
+        //
+        // Gated on addInFlight(): while a just-added monitor is still being
+        // acknowledged by guacd, Add is disabled so screens are added one
+        // settled step at a time. Rapid adds grow the desktop repeatedly and
+        // can crash the RDP child mid-paint.
+        return $scope.showAddMonitor()
+            && !guacManageMonitor.monitorLimitReached()
+            && !guacManageMonitor.addInFlight();
+    };
+
+    /**
+     * Adds a screen from the layout modal, following the same path as the
+     * menu's Add Monitor action. Does nothing if adding is not currently
+     * permitted.
+     */
+    $scope.addScreenFromLayout = function addScreenFromLayout() {
+        if ($scope.canAddScreenFromLayout())
+            $scope.addMonitor();
+    };
+
+    /**
+     * Snapshot of the layout override captured when the modal opens. The
+     * modal's initial-override binding must be a stable reference: a function
+     * expression such as getLayoutOverride() returns a fresh object every
+     * digest, which drives Angular's '=' two-way watch into an infinite digest
+     * loop.
+     *
+     * @type {!Object}
+     */
+    $scope.layoutOverrideSnapshot = {};
+
+    /**
+     * Opens the Display Settings modal.
+     */
+    $scope.openLayoutEditor = function openLayoutEditor() {
+        $scope.layoutOverrideSnapshot = guacManageMonitor.getLayoutOverrideLogical();
+        $scope.monitorsInfosLogical = guacManageMonitor.getMonitorsInfosLogical();
+        $scope.showLayoutEditor = true;
+        $scope.menu.shown = false;
+
+        /* The modal owns the keyboard while open, so keystroke forwarding to
+         * the remote session is suppressed; otherwise the editor's arrow-key
+         * nudge would also reach the remote desktop. A dedicated
+         * keyboardSuppressed flag is used rather than blurring, since blurring
+         * clears clientProperties.focused, which nulls the focused client and
+         * disables the modal's Add Screen control. */
+        if ($scope.clientGroup)
+            $scope.clientGroup.clients.forEach(c => { c.clientProperties.keyboardSuppressed = true; });
+
+        /* Refresh the modal's logical snapshot whenever guacd commits a new
+         * layout, so the reported current layout updates after Apply without
+         * reopening. Wrapped in $evalAsync because the notifier fires from a
+         * draw/instruction handler outside Angular's digest. */
+        guacManageMonitor.onMonitorsInfoUpdate = function () {
+            $scope.$evalAsync(function () {
+                /* Refresh both snapshots the editor reads so it always mirrors
+                 * the live layout; the directive rebuilds its tiles whenever
+                 * the committed geometry changes. */
+                $scope.monitorsInfosLogical = guacManageMonitor.getMonitorsInfosLogical();
+                $scope.layoutOverrideSnapshot = guacManageMonitor.getLayoutOverrideLogical();
+            });
+        };
+    };
+
+    /* Notify the user when a screen is capped, or an add is refused, to keep
+     * the combined desktop within guacd's 8192x8192 surface. Fires once per
+     * clamp event, debounced in guacManageMonitor. Wrapped in $evalAsync
+     * because it can be raised from a draw/broadcast handler outside a
+     * digest. */
+    guacManageMonitor.onExtentClamped = function onExtentClamped(info) {
+        $scope.$evalAsync(function () {
+
+            var reason = info && info.reason;
+
+            var titleKey = 'CLIENT.DIALOG_HEADER_LAYOUT_LIMIT';
+            var textKey = 'CLIENT.TEXT_MONITOR_CLAMPED';
+            if (reason === 'add-no-room')
+                textKey = 'CLIENT.TEXT_ADD_NO_ROOM';
+            else if (reason === 'popup-blocked') {
+                titleKey = 'CLIENT.DIALOG_HEADER_POPUP_BLOCKED';
+                textKey = 'CLIENT.TEXT_POPUP_BLOCKED';
+            }
+
+            var actions = [{
+                name     : 'CLIENT.ACTION_ACKNOWLEDGE',
+                callback : function () { guacNotification.showStatus(false); }
+            }];
+
+            /* Opening the layout editor only helps for size/extent issues,
+             * not for a browser-blocked popup. */
+            if (reason !== 'popup-blocked')
+                actions.unshift({
+                    name     : 'CLIENT.ACTION_CONFIGURE_LAYOUT',
+                    callback : function () {
+                        guacNotification.showStatus(false);
+                        $scope.openLayoutEditor();
+                    }
+                });
+
+            guacNotification.showStatus({
+                title   : titleKey,
+                text    : { key : textKey },
+                actions : actions
+            });
+        });
+    };
+
+    /**
+     * Closes the Display Settings modal without applying anything.
+     */
+    $scope.closeLayoutEditor = function closeLayoutEditor() {
+        $scope.showLayoutEditor = false;
+        guacManageMonitor.onMonitorsInfoUpdate = null;
+
+        /* Re-enable keystroke forwarding (see openLayoutEditor). */
+        if ($scope.clientGroup)
+            $scope.clientGroup.clients.forEach(c => { c.clientProperties.keyboardSuppressed = false; });
+    };
+
+    /**
+     * Expose the live monitorsInfos object to the layout-editor directive.
+     * Wrapped as a function so the directive's two-way binding can pick up
+     * changes (e.g. when a new secondary is added while the modal is open).
+     */
+    $scope.getMonitorsInfos = function getMonitorsInfos() {
+        return guacManageMonitor.getMonitorsInfos();
+    };
+
+    /**
+     * Returns the most recently applied layout override (or {} if none).
+     * Used to seed the modal's tile positions on reopen so the user sees
+     * their last-applied state instead of the cumulative defaults.
+     */
+    $scope.getLayoutOverride = function getLayoutOverride() {
+        return typeof guacManageMonitor.getLayoutOverride === 'function'
+            ? guacManageMonitor.getLayoutOverride()
+            : {};
+    };
+
+    /**
+     * Apply the user's layout from the modal. Calls into guacManageMonitor
+     * to override the wire layout and resend sizes to guacd.
+     *
+     * @param {Object} layout
+     *     Map of monitor id (string) to {leftOffset, topOffset}.
+     */
+    $scope.applyLayout = function applyLayout(layout) {
+        if (typeof guacManageMonitor.applyLayoutOverride === 'function')
+            guacManageMonitor.applyLayoutOverride(layout);
+        /* Keep the modal open after Apply so the user sees the
+         * "Windows currently has" columns refresh live once guacd commits
+         * the new layout (driven by the onMonitorsInfoUpdate notifier
+         * registered in openLayoutEditor). The modal is dismissed
+         * explicitly via Done/Cancel, both of which route through
+         * closeLayoutEditor and clear the notifier. */
+    };
+
+    /* Initialize guacManageMonitor with this session's connection or
+     * client-group identifier as the scope, so parallel Guacamole sessions
+     * opened in the same browser origin do not share their BroadcastChannel
+     * state. */
+    guacManageMonitor.init('primary', $routeParams.id);
     guacManageMonitor.menuShown = function menuShown() {
         $scope.menu.shown = !$scope.menu.shown;
         $scope.$apply();
@@ -946,8 +1181,11 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
         // always unset fullscreen mode to not confuse user 
         guacFullscreen.setFullscreenMode(false);
 
-        // Close additional monitors
+        // Close additional monitors, then tear down the monitor service so its
+        // BroadcastChannel, pending resend timer, and notifier closures do not
+        // outlive this destroyed controller.
         guacManageMonitor.closeAllMonitors();
+        guacManageMonitor.shutdown();
     });
 
 }]);
