@@ -24,20 +24,31 @@ angular.module('client').controller('secondaryMonitorController', ['$scope', '$i
     function clientController($scope, $injector, $routeParams) {
 
     // Required services
+    const $timeout          = $injector.get('$timeout');
     const $window           = $injector.get('$window');
     const guacFullscreen    = $injector.get('guacFullscreen');
     const guacManageMonitor = $injector.get('guacManageMonitor');
 
     /**
      * ID of this monitor.
-     * 
+     *
      * @type {!String}
      */
     const monitorId = $routeParams.id;
 
     /**
-     * In order to open the guacamole menu, we need to hit ctrl-alt-shift. There are
-     * several possible keysysms for each key.
+     * Scope identifier matching the parent (primary) session. Carried in
+     * the URL so this secondary window joins the same BroadcastChannel
+     * scope as its primary and does not see traffic from other parallel
+     * Guacamole connections in the browser origin.
+     *
+     * @type {!String}
+     */
+    const monitorScope = $routeParams.scope || '';
+
+    /**
+     * Opening the Guacamole menu requires Ctrl+Alt+Shift. Each of these keys
+     * has several possible keysyms.
      */
     const SHIFT_KEYS  = {0xFFE1 : true, 0xFFE2 : true},
           ALT_KEYS    = {0xFFE9 : true, 0xFFEA : true, 0xFE03 : true,
@@ -45,26 +56,38 @@ angular.module('client').controller('secondaryMonitorController', ['$scope', '$i
           CTRL_KEYS   = {0xFFE3 : true, 0xFFE4 : true},
           MENU_KEYS   = angular.extend({}, SHIFT_KEYS, ALT_KEYS, CTRL_KEYS);
 
-    guacManageMonitor.init("secondary");
+    guacManageMonitor.init("secondary", monitorScope);
     guacManageMonitor.monitorId = monitorId;
+
+    /**
+     * Pending auto-hide of the fullscreen-consent button, cancelled on
+     * scope destruction so it never fires against a dead scope.
+     */
+    let consentTimeout = null;
 
     guacManageMonitor.openConsentButton = function openConsentButton() {
 
-        // Show button
-        $scope.showFullscreenConsent = true;
-        $scope.$apply();
+        // Show button (raised from outside Angular's digest)
+        $scope.$evalAsync(function () {
+            $scope.showFullscreenConsent = true;
+        });
 
         // Auto hide button after delay
-        setTimeout(function() {
+        $timeout.cancel(consentTimeout);
+        consentTimeout = $timeout(function() {
             $scope.showFullscreenConsent = false;
-            $scope.$apply();
         }, 10000);
 
     };
 
+    $scope.$on('$destroy', function () {
+        $timeout.cancel(consentTimeout);
+    });
+
     /**
-     * User clicked on the consent button : switch to fullscreen mode and hide
-     * the button.
+     * Handles a click on the consent button by switching to fullscreen mode
+     * and hiding the button. Fullscreen requires a user gesture, so it is
+     * entered from this handler rather than automatically.
      */
     $scope.enableFullscreenMode = function enableFullscreenMode() {
         guacFullscreen.setFullscreenMode(true);
@@ -83,8 +106,8 @@ angular.module('client').controller('secondaryMonitorController', ['$scope', '$i
      */  
     const isMenuShortcutPressed = function isMenuShortcutPressed(keyboard) {
 
-        // Ctrl+Alt+Shift has NOT been pressed if any key is currently held
-        // down that isn't Ctrl, Alt, or Shift
+        // The shortcut has not been pressed if any key other than Ctrl, Alt,
+        // or Shift is currently held down
         if (_.findKey(keyboard.pressed, (_, keysym) => !MENU_KEYS[keysym]))
             return false;
 
