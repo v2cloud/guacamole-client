@@ -131,10 +131,15 @@
 
     </div>
 
-    <div class="preview">
-        <h3>{{ 'CLIENT.SECTION_HEADER_SCREEN_POSITIONS' | translate }}</h3>
-        <p class="instructions">{{ 'CLIENT.HELP_SCREEN_POSITIONS' | translate }}</p>
-        <table class="coord-table">
+    <div class="preview" ng-class="{ collapsed: positionsCollapsed }">
+        <h3 class="preview-toggle" ng-click="positionsCollapsed = !positionsCollapsed"
+            role="button" tabindex="0" aria-expanded="{{ !positionsCollapsed }}"
+            ng-keydown="($event.keyCode === 13 || $event.keyCode === 32) && (positionsCollapsed = !positionsCollapsed); ($event.keyCode === 13 || $event.keyCode === 32) && $event.preventDefault()">
+            <span class="preview-caret">{{ positionsCollapsed ? '▶' : '▼' }}</span>
+            {{ 'CLIENT.SECTION_HEADER_SCREEN_POSITIONS' | translate }}
+        </h3>
+        <p class="instructions" ng-hide="positionsCollapsed">{{ 'CLIENT.HELP_SCREEN_POSITIONS' | translate }}</p>
+        <table class="coord-table" ng-hide="positionsCollapsed">
             <thead>
                 <tr>
                     <th rowspan="2">{{ 'CLIENT.TABLE_HEADER_MONITOR' | translate }}</th>

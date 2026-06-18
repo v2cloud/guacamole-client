@@ -53,9 +53,9 @@ angular.module('client').directive('monitorLayoutEditor', ['$document', 'guacMan
             // the modal (measured live); height adapts to the layout's aspect
             // ratio within this band. Both are recomputed every buildTiles().
             scope.canvasWidth = 800;
-            scope.canvasHeight = 400;
-            var CANVAS_MIN_H = 340;   // room to drag monitors above/below
-            var CANVAS_MAX_H = 560;   // keep the canvas from dominating the modal
+            scope.canvasHeight = 360;
+            var CANVAS_MIN_H = 280;   // room to drag monitors above/below
+            var CANVAS_MAX_H = 440;   // keep the canvas from dominating the modal
             // Upper bound on the auto-fit (open) real-px to canvas-px scale.
             // Without it a one- or two-monitor layout fills the whole canvas
             // (large tiles, no room to arrange). At 0.1 a 1920px monitor renders
@@ -106,6 +106,9 @@ angular.module('client').directive('monitorLayoutEditor', ['$document', 'guacMan
             // reference every digest drives ng-repeat into $rootScope:infdig.
             scope.wireLayout = {};
             scope.warningMsgs = [];   // [{ key, values }], translated in the template
+            // Screen positions table starts collapsed; the user expands it via
+            // the section header to see/edit exact per-monitor offsets.
+            scope.positionsCollapsed = true;
             // True when the edited layout differs from what Windows currently
             // has (Apply would change something). Drives the footer status line,
             // the Apply button state, and the changed-row highlight.

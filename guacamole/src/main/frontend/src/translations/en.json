@@ -100,7 +100,7 @@
         "TOOLTIP_ADD_MONITOR_NO_ROOM"    : "No room for another screen — resize or move existing screens first.",
 
         "SECTION_HEADER_MONITOR_LAYOUT"   : "Configure Monitor Layout",
-        "SECTION_HEADER_SCREEN_POSITIONS" : "Screen positions",
+        "SECTION_HEADER_SCREEN_POSITIONS" : "Fine-tune positions",
         "HELP_MONITOR_LAYOUT"             : "Drag a screen to position it — screens snap together automatically. Drag the main screen (or empty space) to move them all. Use the + button (bottom-left) to add a screen, and the zoom and Fit controls (bottom-right) to re-frame. Fine-tune with the arrow keys or the fields below.",
         "HELP_SCREEN_POSITIONS"           : "Positions are in pixels, relative to the primary screen at (0, 0). Type exact values, or just drag the screens above.",
         "HELP_LAYOUT_VALIDITY"            : "Screens must touch along an edge, with no gaps or overlaps. Drag them together — they snap into place automatically, or use Reset to start from a clean layout.",

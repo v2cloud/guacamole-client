@@ -97,7 +97,7 @@
         "TOOLTIP_ADD_MONITOR_NO_ROOM"    : "Pas de place pour un autre écran — redimensionnez ou déplacez d'abord les écrans existants.",
 
         "SECTION_HEADER_MONITOR_LAYOUT"   : "Configurer la disposition des écrans",
-        "SECTION_HEADER_SCREEN_POSITIONS" : "Positions des écrans",
+        "SECTION_HEADER_SCREEN_POSITIONS" : "Ajuster les positions",
         "HELP_MONITOR_LAYOUT"             : "Faites glisser un écran pour le positionner — les écrans s'assemblent automatiquement. Faites glisser l'écran principal (ou un espace vide) pour tout déplacer. Utilisez le bouton + (en bas à gauche) pour ajouter un écran, et les commandes de zoom et Ajuster (en bas à droite) pour recadrer. Affinez avec les flèches du clavier ou les champs ci-dessous.",
         "HELP_SCREEN_POSITIONS"           : "Les positions sont en pixels, par rapport à l'écran principal en (0, 0). Saisissez des valeurs exactes, ou faites simplement glisser les écrans ci-dessus.",
         "HELP_LAYOUT_VALIDITY"            : "Les écrans doivent se toucher le long d'un bord, sans espace ni chevauchement. Rapprochez-les — ils s'assemblent automatiquement, ou utilisez Réinitialiser pour repartir d'une disposition propre.",

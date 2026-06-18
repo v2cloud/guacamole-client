@@ -53,9 +53,9 @@
     --g-warn-ink:  #7a5a00;
 
     box-sizing: border-box;
-    /* Wider than the original 900px so many-monitor layouts (e.g. 6+ 2K
-     * secondaries) have room to render at a legible scale. */
-    width: min(1040px, 95vw);
+    /* Sized to stay compact on a 1080p screen while still giving many-monitor
+     * layouts (e.g. 6+ 2K secondaries) room to render at a legible scale. */
+    width: min(880px, 94vw);
     margin: 0 auto;
     /* Flex column: a scrollable .mle-body + a pinned .footer. Bounding the
      * height here (and scrolling INSIDE) keeps the footer a flex sibling below
@@ -296,6 +296,32 @@
     font-size: 0.95em;
     font-weight: bold;
     color: var(--g-ink);
+}
+
+/* Collapsible Screen positions header */
+.monitor-layout-editor .preview h3.preview-toggle {
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    outline: none;
+}
+
+.monitor-layout-editor .preview h3.preview-toggle:hover,
+.monitor-layout-editor .preview h3.preview-toggle:focus-visible {
+    color: var(--g-accent, #267);
+}
+
+.monitor-layout-editor .preview .preview-caret {
+    font-size: 0.7em;
+    line-height: 1;
+    color: var(--g-muted, #888);
+}
+
+/* When collapsed, drop the bottom padding so only the header shows. */
+.monitor-layout-editor .preview.collapsed {
+    padding-bottom: 0.55em;
 }
 
 .monitor-layout-editor .coord-table {
