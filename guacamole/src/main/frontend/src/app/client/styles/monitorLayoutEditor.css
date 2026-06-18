@@ -493,7 +493,7 @@
     -khtml-background-size:  1.5em 1.5em;
     background-repeat: no-repeat;
     background-position: 1em center;
-    background-image: url('images/protocol-icons/guac-monitor.svg');
+    background-image: url('images/protocol-icons/guac-multi-monitor.svg');
 }
 #guac-menu #multi-monitor .configure-layout:hover {
     cursor: pointer;
