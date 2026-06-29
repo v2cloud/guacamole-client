@@ -64,6 +64,14 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
     let broadcast = null;
 
     /**
+     * The primary monitor's 'fullscreenchange' listener, kept so init() and
+     * shutdown() can detach it.
+     *
+     * @type Function
+     */
+    let fullscreenChangeHandler = null;
+
+    /**
      * The maximum number of secondary monitors allowed.
      *
      * @type Number
@@ -364,9 +372,17 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
             monitorScope = String(scope);
 
         if (monitorType == "primary") {
-            guacFullscreen.onfullscreen = function onfullscreen(state) {
-                service.pushBroadcastMessage('fullscreen', state);
-            }
+
+            // Listen on fullscreenchange instead of hooking setFullscreenMode()
+            // so ESC also reaches the secondaries.
+            if (fullscreenChangeHandler)
+                document.removeEventListener('fullscreenchange', fullscreenChangeHandler);
+
+            fullscreenChangeHandler = function fullscreenChangeHandler() {
+                service.pushBroadcastMessage('fullscreen', !!guacFullscreen.isInFullscreenMode());
+            };
+
+            document.addEventListener('fullscreenchange', fullscreenChangeHandler);
         }
 
         // Create broadcast if supported
@@ -651,7 +667,8 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
 
                 // setFullscreenMode require explicit user action
                 if (message.data.fullscreen) {
-                    if (service.openConsentButton) service.openConsentButton();
+                    if (!guacFullscreen.isInFullscreenMode() && service.openConsentButton)
+                        service.openConsentButton();
                 }
 
                 // Close fullscreen mode instantly
@@ -1012,6 +1029,12 @@ service.addInFlight = function addInFlight() {
         // from a clean "no layout applied yet" state.
         service._layoutReady = false;
         service._handlerQueue = [];
+
+        // Drop the fullscreenchange listener added in init().
+        if (fullscreenChangeHandler) {
+            document.removeEventListener('fullscreenchange', fullscreenChangeHandler);
+            fullscreenChangeHandler = null;
+        }
 
         // Release closures that captured the (now destroyed) controller scope.
         service.onMonitorsInfoUpdate = null;

@@ -24,7 +24,6 @@ angular.module('client').controller('secondaryMonitorController', ['$scope', '$i
     function clientController($scope, $injector, $routeParams) {
 
     // Required services
-    const $timeout          = $injector.get('$timeout');
     const $window           = $injector.get('$window');
     const guacFullscreen    = $injector.get('guacFullscreen');
     const guacManageMonitor = $injector.get('guacManageMonitor');
@@ -59,38 +58,22 @@ angular.module('client').controller('secondaryMonitorController', ['$scope', '$i
     guacManageMonitor.init("secondary", monitorScope);
     guacManageMonitor.monitorId = monitorId;
 
-    /**
-     * Pending auto-hide of the fullscreen-consent button, cancelled on
-     * scope destruction so it never fires against a dead scope.
-     */
-    let consentTimeout = null;
-
     guacManageMonitor.openConsentButton = function openConsentButton() {
 
-        // Show button (raised from outside Angular's digest)
+        // Show prompt (raised from outside Angular's digest)
         $scope.$evalAsync(function () {
             $scope.showFullscreenConsent = true;
         });
 
-        // Auto hide button after delay
-        $timeout.cancel(consentTimeout);
-        consentTimeout = $timeout(function() {
-            $scope.showFullscreenConsent = false;
-        }, 10000);
-
     };
 
-    $scope.$on('$destroy', function () {
-        $timeout.cancel(consentTimeout);
-    });
-
-    /**
-     * Handles a click on the consent button by switching to fullscreen mode
-     * and hiding the button. Fullscreen requires a user gesture, so it is
-     * entered from this handler rather than automatically.
-     */
+    // Enter fullscreen, then hide the prompt
     $scope.enableFullscreenMode = function enableFullscreenMode() {
         guacFullscreen.setFullscreenMode(true);
+        $scope.showFullscreenConsent = false;
+    };
+
+    $scope.declineFullscreenMode = function declineFullscreenMode() {
         $scope.showFullscreenConsent = false;
     };
 

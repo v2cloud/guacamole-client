@@ -79,6 +79,8 @@
         "ACTION_DISCONNECT"                : "Disconnect",
         "ACTION_FULLSCREEN"                : "Fullscreen",
         "ACTION_FULLSCREEN_CONSENT"        : "Would you like to enable full screen?",
+        "ACTION_FULLSCREEN_YES"            : "Enter full screen",
+        "ACTION_FULLSCREEN_NO"             : "Not now",
         "ACTION_LOGOUT"                    : "@:APP.ACTION_LOGOUT",
         "ACTION_NAVIGATE_BACK"             : "@:APP.ACTION_NAVIGATE_BACK",
         "ACTION_NAVIGATE_HOME"             : "@:APP.ACTION_NAVIGATE_HOME",

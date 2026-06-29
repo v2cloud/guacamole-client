@@ -8,11 +8,36 @@
             <!-- Central portion of view -->
             <div class="client-body">
 
-                <button id="consent-fullscreen-button"
-                        ng-if="showFullscreenConsent"
-                        ng-click="enableFullscreenMode()">
-                    {{'CLIENT.ACTION_FULLSCREEN_CONSENT' | translate}}
-                </button>
+                <div id="consent-fullscreen" ng-if="showFullscreenConsent">
+                    <span id="consent-fullscreen-message">
+                        {{'CLIENT.ACTION_FULLSCREEN_CONSENT' | translate}}
+                    </span>
+                    <span id="consent-fullscreen-buttons">
+                        <button id="consent-fullscreen-no"
+                                class="consent-fullscreen-btn"
+                                ng-click="declineFullscreenMode()"
+                                title="{{'CLIENT.ACTION_FULLSCREEN_NO' | translate}}"
+                                aria-label="{{'CLIENT.ACTION_FULLSCREEN_NO' | translate}}">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                 stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                        <button id="consent-fullscreen-yes"
+                                class="consent-fullscreen-btn"
+                                ng-click="enableFullscreenMode()"
+                                title="{{'CLIENT.ACTION_FULLSCREEN_YES' | translate}}"
+                                aria-label="{{'CLIENT.ACTION_FULLSCREEN_YES' | translate}}">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                 stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <polyline points="20 6 9 17 4 12"/>
+                            </svg>
+                        </button>
+                    </span>
+                </div>
 
                 <guac-client-secondary client="client"></guac-client-secondary>
 
