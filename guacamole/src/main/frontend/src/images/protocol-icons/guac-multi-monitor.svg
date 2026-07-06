@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <!-- back frame: same size as front, 6px bezel, rx matches front -->
+    <mask id="backscreen">
+      <rect x="18" y="4" width="42" height="31" rx="4" fill="#fff"/>
+      <rect x="24" y="10" width="30" height="19" rx="2" fill="#000"/>
+    </mask>
+    <!-- separation: knock an enlarged front silhouette out of the back -> transparent gap -->
+    <mask id="sep">
+      <rect width="64" height="64" fill="#fff"/>
+      <rect x="-1" y="15" width="46" height="37" rx="7" fill="#000"/>
+    </mask>
+    <!-- front frame: solid body minus transparent screen hole (6px bezel) -->
+    <mask id="frontscreen">
+      <rect x="2" y="18" width="42" height="31" rx="4" fill="#fff"/>
+      <rect x="8" y="24" width="30" height="19" rx="2" fill="#000"/>
+    </mask>
+  </defs>
+  <!-- back monitor: same frame style + size as front, closer, separated by transparent gap -->
+  <g mask="url(#sep)">
+    <rect x="18" y="4" width="42" height="31" rx="4" fill="#000" mask="url(#backscreen)"/>
+  </g>
+  <!-- front monitor -->
+  <rect x="2" y="18" width="42" height="31" rx="4" fill="#000" mask="url(#frontscreen)"/>
+  <rect x="14" y="52" width="18" height="5" rx="2.5" fill="#000"/>
+</svg>

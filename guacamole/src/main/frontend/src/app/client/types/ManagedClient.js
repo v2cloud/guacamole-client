@@ -52,6 +52,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
     const guacAudio               = $injector.get('guacAudio');
     const guacHistory             = $injector.get('guacHistory');
     const guacImage               = $injector.get('guacImage');
+    const guacManageMonitor       = $injector.get('guacManageMonitor');
     const guacVideo               = $injector.get('guacVideo');
 
     /**
@@ -280,6 +281,13 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // Calculate optimal width/height for display
         const pixel_density = $window.devicePixelRatio || 1;
         const optimal_dpi = pixel_density * 96;
+
+        /* Pin the session DPR to the value guacd uses for the whole session,
+         * the floored GUAC_DPI below divided by 96, so client-side
+         * committed-space math stays aligned with the server's even when the
+         * window later moves to a monitor with a different DPI or the zoom
+         * changes. */
+        guacManageMonitor.setSessionDpr(Math.floor(optimal_dpi) / 96);
         const optimal_width = width * pixel_density;
         const optimal_height = height * pixel_density;
 
@@ -575,7 +583,9 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             reader.onend = function textComplete() {
                 ManagedArgument.getInstance(managedClient, name, value).then(function argumentIsMutable(argument) {
                     managedClient.arguments[name] = argument;
-                }, function ignoreImmutableArguments() {});
+                }, function immutableArguments() {
+                    managedClient.arguments[name] = value;
+                });
             };
 
         };
@@ -653,6 +663,23 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                     managedClient.requiredParameters[name] = '';
                 });
             });
+        };
+        
+        // Update display on other monitors
+        client.ondisplayupdate = async function displayUpdate(opcode, parameters) {
+
+            // Skip if no other monitor
+            if (guacManageMonitor.getMonitorCount() <= 1)
+                return;
+
+            const handler = {
+                'opcode': opcode,
+                'parameters': parameters,
+            };
+
+            // Send handler
+            guacManageMonitor.pushBroadcastMessage('handler', handler);
+
         };
 
         // Manage the client display
@@ -880,7 +907,13 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         var model = {};
 
         angular.forEach(client.arguments, function addModelEntry(managedArgument) {
-            model[managedArgument.name] = managedArgument.value;
+
+            /* The arguments map also stores raw string values for
+             * immutable parameters; only mutable ManagedArgument
+             * instances belong in the editable model. */
+            if (managedArgument instanceof ManagedArgument)
+                model[managedArgument.name] = managedArgument.value;
+
         });
 
         return model;

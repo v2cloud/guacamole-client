@@ -215,6 +215,20 @@ angular.module('index').config(['$routeProvider', '$locationProvider',
             resolve       : { updateCurrentToken: updateCurrentToken }
         })
 
+        // Secondary monitor view. The :scope segment ties this window to a
+        // specific primary client session so that BroadcastChannel state, such
+        // as the monitor layout and forwarded drawing instructions, does not
+        // leak between parallel Guacamole connections opened in the same
+        // browser origin, where each connection may have its own secondary
+        // monitors open.
+        .when('/secondaryMonitor/:scope/:id', {
+            bodyClassName : 'secondaryMonitor',
+            templateUrl   : 'app/client/templates/secondaryMonitor.html',
+            controller    : 'secondaryMonitorController',
+            reloadOnUrl   : false,
+            resolve       : { updateCurrentToken: updateCurrentToken }
+        })
+
         // Redirect to home screen if page not found
         .otherwise({
             resolve : { routeToUserHomePage: routeToUserHomePage }
