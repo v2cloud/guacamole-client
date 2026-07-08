@@ -34,14 +34,16 @@ Guacamole.Display = function() {
      * Reference to this Guacamole.Display.
      * @private
      */
-    var guac_display = this;
+    const guac_display = this;
 
-    var displayWidth = 0;
-    var displayHeight = 0;
-    var displayScale = 1;
+    let displayWidth = 0;
+    let displayHeight = 0;
+    let monitorWidth = null;
+    let monitorHeight = null;
+    let displayScale = 1;
 
     // Create display
-    var display = document.createElement("div");
+    const display = document.createElement("div");
     display.style.position = "relative";
     display.style.width = displayWidth + "px";
     display.style.height = displayHeight + "px";
@@ -542,7 +544,7 @@ Guacamole.Display = function() {
 
     /**
      * Returns the height of this display.
-     * 
+     *
      * @return {!number}
      *     The height of this display;
      */
@@ -740,7 +742,7 @@ Guacamole.Display = function() {
      * @param {!number} y
      *     The Y coordinate to move the cursor to.
      */
-    this.moveCursor = function(x, y) {
+    this.moveCursor = function moveCursor(x, y) {
 
         // Move cursor layer
         cursor.translate(x - guac_display.cursorHotspotX,
@@ -751,6 +753,26 @@ Guacamole.Display = function() {
         guac_display.cursorY = y;
 
     };
+
+    /**
+     * Set the current monitor size. When set, subsequent default-layer
+     * resize requests are clamped to these dimensions so this window's
+     * canvas represents only one monitor of a multi-monitor remote
+     * desktop. The server is responsible for ensuring that drawing
+     * operations transmitted to this client target this monitor's
+     * region (cross-monitor copy operations are decomposed server-side
+     * into image transmissions, so the client never needs source pixels
+     * from a different monitor's canvas).
+     *
+     * @param {!number} width
+     *     The width of the monitor, in pixels.
+     * @param {!number} height
+     *     The height of the monitor, in pixels.
+     */
+    this.setMonitorSize = function setMonitorSize(width, height) {
+        monitorWidth = width;
+        monitorHeight = height;
+    }
 
     /**
      * Changes the size of the given Layer to the given width and height.
@@ -768,6 +790,19 @@ Guacamole.Display = function() {
      */
     this.resize = function(layer, width, height) {
         scheduleTask(function __display_resize() {
+
+            // Adjust dimensions of the default layer only when this window
+            // represents a single monitor of a multi-monitor desktop;
+            // buffers and child layers must keep their requested size
+            if (layer === default_layer) {
+
+                if (monitorWidth)
+                    width = monitorWidth;
+
+                if (monitorHeight)
+                    height = monitorHeight;
+
+            }
 
             layer.resize(width, height);
 

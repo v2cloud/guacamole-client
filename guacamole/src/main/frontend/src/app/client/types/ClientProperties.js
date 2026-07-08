@@ -73,6 +73,17 @@ angular.module('client').factory('ClientProperties', ['$injector', function defi
         this.focused = template.focused || false;
 
         /**
+         * Whether keystroke forwarding to the remote session is temporarily
+         * suppressed even though the client is focused. Set while the Configure
+         * Monitor Layout modal is open so its arrow-key nudge does not also
+         * reach the remote desktop, without dropping focus (which the modal's
+         * Add Screen control depends on).
+         *
+         * @type Boolean
+         */
+        this.keyboardSuppressed = template.keyboardSuppressed || false;
+
+        /**
          * The relative Y coordinate of the scroll offset of the display within
          * the client element.
          * 

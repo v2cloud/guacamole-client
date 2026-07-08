@@ -114,6 +114,18 @@
                     </div>
                 </div>
 
+                <!-- Multi monitor -->
+                <div class="menu-section" id="multi-monitor" ng-if="showAddMonitor()">
+                    <h3>{{'CLIENT.SECTION_HEADER_MULTI_MONITOR' | translate}}</h3>
+                    <div class="content">
+                        <div class="configure-layout"
+                             ng-if="canConfigureLayout()"
+                             ng-click="openLayoutEditor()">
+                            {{'CLIENT.ACTION_CONFIGURE_LAYOUT' | translate}}
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Devices -->
                 <div class="menu-section" id="devices" ng-if="focusedClient.filesystems.length">
                     <h3>{{'CLIENT.SECTION_HEADER_DEVICES' | translate}}</h3>
@@ -279,4 +291,18 @@
         </div>
     </div>
 
+
+<div class="layout-editor-modal" ng-if="showLayoutEditor">
+    <div class="layout-editor-backdrop" ng-click="closeLayoutEditor()"></div>
+    <div class="layout-editor-container">
+        <monitor-layout-editor
+            monitors-infos="monitorsInfosLogical"
+            initial-override="layoutOverrideSnapshot"
+            on-apply="applyLayout(layout)"
+            on-close="closeLayoutEditor()"
+            on-add-screen="addScreenFromLayout()"
+            can-add-screen="canAddScreenFromLayout()">
+        </monitor-layout-editor>
+    </div>
+</div>
 </guac-viewport>

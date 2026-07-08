@@ -18,7 +18,7 @@
  */
 
 /**
- * A directive for the guacamole client.
+ * A directive for the Guacamole client.
  */
 angular.module('client').directive('guacClient', [function guacClient() {
 
@@ -51,11 +51,12 @@ angular.module('client').directive('guacClient', [function guacClient() {
         function guacClientController($scope, $injector, $element) {
 
         // Required types
-        const ManagedClient = $injector.get('ManagedClient');
+        const ManagedClient     = $injector.get('ManagedClient');
             
         // Required services
-        const $rootScope = $injector.get('$rootScope');
-        const $window = $injector.get('$window');
+        const $rootScope        = $injector.get('$rootScope');
+        const $window           = $injector.get('$window');
+        const guacManageMonitor = $injector.get('guacManageMonitor');
             
         /**
          * Whether the local, hardware mouse cursor is in use.
@@ -455,15 +456,32 @@ angular.module('client').directive('guacClient', [function guacClient() {
             // Send new display size, if changed
             if (client && display && main.offsetWidth && main.offsetHeight) {
 
+                /* Clamp the initial connect handshake to the MS-RDPEDISP
+                 * section 2.2.2.2.1 range so the first size announcement is
+                 * already valid: width even, and both dimensions within
+                 * [200, 8192]. Runtime resizes go through
+                 * guacManageMonitor.sendSize, which applies the same clamp. */
+                const initW = guacManageMonitor.clampDim(main.offsetWidth, true);
+                const initH = guacManageMonitor.clampDim(main.offsetHeight, false);
+
                 // Connect, if not already connected
-                ManagedClient.connect($scope.client, main.offsetWidth, main.offsetHeight);
+                ManagedClient.connect($scope.client, initW, initH);
 
                 const pixelDensity = $window.devicePixelRatio || 1;
-                const width  = main.offsetWidth  * pixelDensity;
-                const height = main.offsetHeight * pixelDensity;
+                const width    = main.offsetWidth  * pixelDensity;
+                const height   = main.offsetHeight * pixelDensity;
+                const top      = $window.screenY;
+                const left     = $window.screenX;
 
+                // Window resized
                 if (display.getWidth() !== width || display.getHeight() !== height)
-                    client.sendSize(width, height);
+                    guacManageMonitor.sendSize(client, {
+                        width: width,
+                        height: height,
+                        monitorId: 0,
+                        top: top,
+                        left: left,
+                    });
 
             }
 
@@ -573,31 +591,40 @@ angular.module('client').directive('guacClient', [function guacClient() {
             ManagedClient.setClipboard($scope.client, data);
         });
 
+        /* Keystrokes forward to the remote session only when the client is
+         * focused and keyboard forwarding is not suppressed. keyboardSuppressed
+         * is set while the Configure Layout modal is open so its arrow-key
+         * nudge does not also reach the remote desktop, while keeping focus,
+         * which the modal depends on. */
+        const keyboardEnabled = () =>
+                $scope.client.clientProperties.focused
+                && !$scope.client.clientProperties.keyboardSuppressed;
+
         // Translate local keydown events to remote keydown events if keyboard is enabled
         $scope.$on('guacKeydown', function keydownListener(event, keysym, keyboard) {
-            if ($scope.client.clientProperties.focused) {
+            if (keyboardEnabled()) {
                 client.sendKeyEvent(1, keysym);
                 event.preventDefault();
             }
         });
-        
+
         // Translate local keyup events to remote keyup events if keyboard is enabled
         $scope.$on('guacKeyup', function keyupListener(event, keysym, keyboard) {
-            if ($scope.client.clientProperties.focused) {
+            if (keyboardEnabled()) {
                 client.sendKeyEvent(0, keysym);
                 event.preventDefault();
-            }   
+            }
         });
 
         // Universally handle all synthetic keydown events
         $scope.$on('guacSyntheticKeydown', function syntheticKeydownListener(event, keysym) {
-            if ($scope.client.clientProperties.focused)
+            if (keyboardEnabled())
                 client.sendKeyEvent(1, keysym);
         });
-        
+
         // Universally handle all synthetic keyup events
         $scope.$on('guacSyntheticKeyup', function syntheticKeyupListener(event, keysym) {
-            if ($scope.client.clientProperties.focused)
+            if (keyboardEnabled())
                 client.sendKeyEvent(0, keysym);
         });
 

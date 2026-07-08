@@ -1,0 +1,208 @@
+<!--
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ -->
+
+<div class="monitor-layout-editor">
+
+    <!-- Scrollable body. The .footer below is a flex sibling OUTSIDE this body,
+         so it stays pinned at the modal bottom and can never float up over the
+         canvas when the modal is taller than the viewport. -->
+    <div class="mle-body">
+
+    <h2>{{ 'CLIENT.SECTION_HEADER_MONITOR_LAYOUT' | translate }}</h2>
+
+    <p class="instructions">{{ 'CLIENT.HELP_MONITOR_LAYOUT' | translate }}</p>
+
+    <div class="canvas-region">
+
+        <div class="layout-canvas"
+             ng-class="{ 'is-panning': panning }"
+             ng-mousedown="startPan($event)"
+             ng-style="{ height: canvasHeight + 'px' }">
+
+            <!-- Tool pills live INSIDE the canvas so they always anchor to it
+                 (the canvas is the positioned/clipped box) and can never spill
+                 outside it, whatever the surrounding modal CSS does. -->
+
+            <!-- BOTTOM-LEFT: add a screen (the one button here that opens a real
+                 monitor) — kept apart from the safe view tools on the right. -->
+            <div class="canvas-tools canvas-tools-left">
+                <button type="button" class="canvas-btn add-screen-btn" ng-click="addScreen()"
+                        ng-disabled="!canAddScreen()"
+                        title="{{ 'CLIENT.ACTION_ADD_MONITOR' | translate }}"
+                        aria-label="{{ 'CLIENT.ACTION_ADD_MONITOR' | translate }}">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <rect x="2" y="3" width="20" height="14" rx="2"/>
+                        <line x1="8" y1="21" x2="16" y2="21"/>
+                        <line x1="12" y1="17" x2="12" y2="21"/>
+                        <line x1="12" y1="6.5" x2="12" y2="13.5"/>
+                        <line x1="8.5" y1="10" x2="15.5" y2="10"/>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- BOTTOM-RIGHT: safe reflow + view tools (Reset, Fit, zoom). -->
+            <div class="canvas-tools zoom-toolbar">
+                <button type="button" class="canvas-btn reset-btn" ng-click="resetLayout()"
+                        title="{{ 'CLIENT.ACTION_RESET_LAYOUT' | translate }}"
+                        aria-label="{{ 'CLIENT.ACTION_RESET_LAYOUT' | translate }}">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <polyline points="1 4 1 10 7 10"/>
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+                    </svg>
+                </button>
+                <button type="button" class="canvas-btn fit-btn" ng-click="fitView()"
+                        title="{{ 'CLIENT.ACTION_FIT_VIEW' | translate }}"
+                        aria-label="{{ 'CLIENT.ACTION_FIT_VIEW' | translate }}">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                    </svg>
+                </button>
+                <span class="zoom-sep"></span>
+                <button type="button" class="canvas-btn zoom-btn" ng-click="zoomOut()"
+                        ng-disabled="!canZoomOut()"
+                        title="{{ 'CLIENT.ACTION_ZOOM_OUT' | translate }}"
+                        aria-label="{{ 'CLIENT.ACTION_ZOOM_OUT' | translate }}">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <circle cx="11" cy="11" r="8"/>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        <line x1="8" y1="11" x2="14" y2="11"/>
+                    </svg>
+                </button>
+                <span class="zoom-readout">{{ zoomPercent }}%</span>
+                <button type="button" class="canvas-btn zoom-btn" ng-click="zoomIn()"
+                        ng-disabled="!canZoomIn()"
+                        title="{{ 'CLIENT.ACTION_ZOOM_IN' | translate }}"
+                        aria-label="{{ 'CLIENT.ACTION_ZOOM_IN' | translate }}">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <circle cx="11" cy="11" r="8"/>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        <line x1="8" y1="11" x2="14" y2="11"/>
+                        <line x1="11" y1="8" x2="11" y2="14"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="monitor-tile"
+                 ng-repeat="tile in tiles track by tile.id"
+                 ng-class="{ 'is-primary': tile.isPrimary, 'is-dragging': dragging === tile.id, 'is-warning': tile.warn, 'is-selected': selectedId === tile.id }"
+                 ng-mousedown="startDrag($event, tile)"
+                 ng-click="selectTile(tile)"
+                 ng-style="{
+                    left:   tile.x + 'px',
+                    top:    tile.y + 'px',
+                    width:  tile.width + 'px',
+                    height: tile.height + 'px'
+                 }">
+                <span class="tile-label">
+                    <span ng-if="tile.isPrimary">&#9733; {{ 'CLIENT.NAME_PRIMARY_MONITOR' | translate }}</span>
+                    <span ng-if="!tile.isPrimary">{{tile.id}}</span>
+                </span>
+                <span class="tile-dim">{{tile.realWidth}}&#215;{{tile.realHeight}}</span>
+                <span class="tile-warn" ng-if="tile.warn">&#9888;</span>
+            </div>
+
+        </div>
+
+    </div>
+
+    <div class="preview" ng-class="{ collapsed: positionsCollapsed }">
+        <h3 class="preview-toggle" ng-click="positionsCollapsed = !positionsCollapsed"
+            role="button" tabindex="0" aria-expanded="{{ !positionsCollapsed }}"
+            ng-keydown="($event.keyCode === 13 || $event.keyCode === 32) && (positionsCollapsed = !positionsCollapsed); ($event.keyCode === 13 || $event.keyCode === 32) && $event.preventDefault()">
+            <span class="preview-caret">{{ positionsCollapsed ? '▶' : '▼' }}</span>
+            {{ 'CLIENT.SECTION_HEADER_SCREEN_POSITIONS' | translate }}
+        </h3>
+        <p class="instructions" ng-hide="positionsCollapsed">{{ 'CLIENT.HELP_SCREEN_POSITIONS' | translate }}</p>
+        <table class="coord-table" ng-hide="positionsCollapsed">
+            <thead>
+                <tr>
+                    <th rowspan="2">{{ 'CLIENT.TABLE_HEADER_MONITOR' | translate }}</th>
+                    <th colspan="2">{{ 'CLIENT.TABLE_HEADER_NEW_POSITION' | translate }}</th>
+                    <th colspan="4">{{ 'CLIENT.TABLE_HEADER_CURRENT_POSITION' | translate }}</th>
+                </tr>
+                <tr>
+                    <th>{{ 'CLIENT.TABLE_HEADER_LEFT' | translate }}</th><th>{{ 'CLIENT.TABLE_HEADER_TOP' | translate }}</th>
+                    <th>{{ 'CLIENT.TABLE_HEADER_LEFT' | translate }}</th><th>{{ 'CLIENT.TABLE_HEADER_TOP' | translate }}</th><th>{{ 'CLIENT.TABLE_HEADER_WIDTH' | translate }}</th><th>{{ 'CLIENT.TABLE_HEADER_HEIGHT' | translate }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr ng-repeat="tile in tiles track by tile.id"
+                    ng-class="{ 'is-warning': tile.warn, 'changed': tile.changed }">
+                    <td>
+                        <span ng-if="tile.isPrimary">&#9733; {{ 'CLIENT.NAME_PRIMARY_MONITOR' | translate }}</span>
+                        <span ng-if="!tile.isPrimary">{{tile.id}}</span>
+                    </td>
+                    <td>
+                        <span ng-if="tile.isPrimary">0</span>
+                        <input ng-if="!tile.isPrimary" type="number" step="1"
+                               class="coord-input"
+                               ng-model="wireLayout[tile.id].leftOffset"
+                               ng-model-options="{ updateOn: 'blur', allowInvalid: true }"
+                               ng-change="onWireChange(tile)"
+                               ng-focus="selectTile(tile)">
+                    </td>
+                    <td>
+                        <span ng-if="tile.isPrimary">0</span>
+                        <input ng-if="!tile.isPrimary" type="number" step="1"
+                               class="coord-input"
+                               ng-model="wireLayout[tile.id].topOffset"
+                               ng-model-options="{ updateOn: 'blur', allowInvalid: true }"
+                               ng-change="onWireChange(tile)"
+                               ng-focus="selectTile(tile)">
+                    </td>
+                    <td class="rendered">{{ rendered(tile.id, 'left') }}</td>
+                    <td class="rendered">{{ rendered(tile.id, 'top') }}</td>
+                    <td class="rendered">{{ rendered(tile.id, 'width') }}</td>
+                    <td class="rendered">{{ rendered(tile.id, 'height') }}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="warnings" ng-if="warningMsgs.length > 0">
+        <p ng-repeat="msg in warningMsgs" class="warning-msg">{{ msg.key | translate : msg.values }}</p>
+        <p class="warning-hint">{{ 'CLIENT.HELP_LAYOUT_VALIDITY' | translate }}</p>
+    </div>
+
+    </div><!-- /.mle-body -->
+
+    <div class="footer">
+        <span class="layout-status"
+              ng-class="{ modified: modified && !overLimit, 'over-limit': overLimit }">
+            <span ng-if="overLimit" class="status-over-limit">&#9888; {{ 'CLIENT.TEXT_LAYOUT_TOO_LARGE' | translate }}</span>
+            <span ng-if="!overLimit && !modified" class="status-clean">&#10003; {{ 'CLIENT.TEXT_LAYOUT_IN_SYNC' | translate }}</span>
+            <span ng-if="!overLimit && modified"  class="status-dirty">&#9679; {{ 'CLIENT.TEXT_LAYOUT_MODIFIED' | translate }}</span>
+        </span>
+        <span class="footer-spacer"></span>
+        <button class="done-btn" ng-click="close()">{{ 'CLIENT.ACTION_CLOSE_LAYOUT' | translate }}</button>
+        <button class="apply-btn" ng-class="{ 'is-dirty': modified && !overLimit }"
+                ng-disabled="!modified || overLimit" ng-click="apply()">{{ 'CLIENT.ACTION_APPLY_LAYOUT' | translate }}</button>
+    </div>
+
+</div>
