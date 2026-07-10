@@ -412,6 +412,26 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
             (parseInt(window.GUAC_RDPECAM_FORCE_IDR_MS, 10) || 2000) : 2000;
 
     /**
+     * Maximum capture frame rate when software-encoding, overridable via
+     * window.GUAC_RDPECAM_SW_MAX_FPS for tuning.
+     *
+     * @private
+     * @type {number}
+     */
+    var swMaxFps = (typeof window !== 'undefined' && window.GUAC_RDPECAM_SW_MAX_FPS) ?
+            (parseInt(window.GUAC_RDPECAM_SW_MAX_FPS, 10) || 10) : 10;
+
+    /**
+     * Encoder bitrate, in bits per second, when software-encoding,
+     * overridable via window.GUAC_RDPECAM_SW_BITRATE for tuning.
+     *
+     * @private
+     * @type {number}
+     */
+    var swBitrate = (typeof window !== 'undefined' && window.GUAC_RDPECAM_SW_BITRATE) ?
+            (parseInt(window.GUAC_RDPECAM_SW_BITRATE, 10) || 800000) : 800000;
+
+    /**
      * Wall-clock timestamp (ms) of last observed keyframe.
      *
      * Initialize to current time instead of 0 to prevent race condition.
@@ -536,11 +556,21 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         /**
          * Whether encoding has already been retried with software encoding
          * after a fatal encoder error. Only one retry is attempted per
-         * capture session.
+         * capture session (see also
+         * Guacamole.H264CameraRecorder._hardwareFailedAtMs).
          *
          * @type {boolean}
          */
         var triedSoftwareFallback = false;
+
+        /* The camera may not honor the requested format exactly. Use the
+         * actual track settings for the encoder configuration. */
+        var track = stream.getVideoTracks()[0];
+        var trackSettings = (track && typeof track.getSettings === 'function')
+                ? track.getSettings() : {};
+        var captureWidth     = trackSettings.width     || format.width;
+        var captureHeight    = trackSettings.height    || format.height;
+        var captureFrameRate = trackSettings.frameRate || format.frameRate;
 
         var encoderOutput = function encoderOutput(chunk, meta) {
                 if (meta && meta.decoderConfig && meta.decoderConfig.description)
@@ -602,13 +632,18 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
             if (!triedSoftwareFallback && effectiveEncoderConfig
                     && effectiveEncoderConfig.hardwareAcceleration !== 'prefer-software') {
                 triedSoftwareFallback = true;
+
+                /* Remember the failure so that future capture sessions use
+                 * software encoding directly. */
+                Guacamole.H264CameraRecorder._hardwareFailedAtMs = Date.now();
+
                 try {
-                    effectiveEncoderConfig = Object.assign({}, effectiveEncoderConfig,
-                            { hardwareAcceleration: 'prefer-software' });
+                    effectiveEncoderConfig = buildConfig('prefer-software');
                     encoder = new VideoEncoder({ output: encoderOutput, error: encoderError });
                     encoder.configure(effectiveEncoderConfig);
                     requireKeyframe();
-                    console.warn('Guacamole.H264CameraRecorder: retrying with software encoding');
+                    console.warn('Guacamole.H264CameraRecorder: retrying with software encoding: '
+                            + JSON.stringify(effectiveEncoderConfig));
                     return;
                 }
                 catch (retryError) {
@@ -639,54 +674,119 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
             return '29';                            // Level 4.1 fallback
         };
 
-        var codecString = 'avc1.6400' + selectLevelIdcHex(format.width, format.height);
+        /* Hardware encoding uses High profile. Software encoding uses
+         * Constrained Baseline, which is what Chrome's software encoder
+         * (OpenH264) produces. */
+        var codecFor = function codecFor(hwPref) {
+            var profile = (hwPref === 'prefer-software') ? 'avc1.42E0' : 'avc1.6400';
+            return profile + selectLevelIdcHex(captureWidth, captureHeight);
+        };
 
         // Calculate optimal bitrate based on resolution height
         // Matches FreeRDP's bitrate recommendations for RDPECAM
         // Source: https://livekit.io/webrtc/bitrate-guide (webcam streaming)
         var defaultBitrate;
-        if (format.height >= 1080) {
+        if (captureHeight >= 1080) {
             defaultBitrate = 2700000;  // 2.7 Mbps for 1080p
-        } else if (format.height >= 720) {
+        } else if (captureHeight >= 720) {
             defaultBitrate = 1250000;  // 1.25 Mbps for 720p
-        } else if (format.height >= 480) {
+        } else if (captureHeight >= 480) {
             defaultBitrate = 700000;   // 700 kbps for 480p
-        } else if (format.height >= 360) {
+        } else if (captureHeight >= 360) {
             defaultBitrate = 400000;   // 400 kbps for 360p
-        } else if (format.height >= 240) {
+        } else if (captureHeight >= 240) {
             defaultBitrate = 170000;   // 170 kbps for 240p
         } else {
             defaultBitrate = 100000;   // 100 kbps for lower resolutions
         }
 
-        // Configure encoder
-        var encoderConfig = {
-            codec: codecString,
-            width: format.width,
-            height: format.height,
-            framerate: format.frameRate,
-            hardwareAcceleration: 'prefer-hardware',
-            latencyMode: 'quality',
-            bitrate: defaultBitrate,
-            bitrateMode: 'variable'
+        /* Builds the encoder configuration for the given hardware
+         * preference. Software encoding uses realtime latency mode and a
+         * lower bitrate, matching the parameters used by the old WebRTC
+         * camera implementation. */
+        var buildConfig = function buildConfig(hwPref) {
+            var software = (hwPref === 'prefer-software');
+            return {
+                codec: codecFor(hwPref),
+                width: captureWidth,
+                height: captureHeight,
+                framerate: captureFrameRate,
+                hardwareAcceleration: hwPref,
+                latencyMode: software ? 'realtime' : 'quality',
+                bitrate: software ? swBitrate : defaultBitrate,
+                bitrateMode: 'variable'
+            };
         };
 
-        var effectiveEncoderConfig = encoderConfig;
-        try {
-            encoder.configure(encoderConfig);
-        }
-        catch (configureError) {
-            if (encoderConfig.colorSpace) {
-                effectiveEncoderConfig = Object.assign({}, encoderConfig);
-                delete effectiveEncoderConfig.colorSpace;
-                encoder.configure(effectiveEncoderConfig);
+        /* Determines the hardwareAcceleration preference for this session.
+         * Hardware failures may be transient (encoder sessions exhausted,
+         * driver reset, etc.), so software encoding is used for a while
+         * after a failure, after which hardware support is re-probed via
+         * isConfigSupported(). */
+        var chooseEncoderPreference = function chooseEncoderPreference() {
+
+            var failedAt = Guacamole.H264CameraRecorder._hardwareFailedAtMs;
+            if (!failedAt)
+                return Promise.resolve('prefer-hardware');
+
+            var sinceFailure = Date.now() - failedAt;
+            if (sinceFailure < Guacamole.H264CameraRecorder._HW_RETRY_INTERVAL_MS) {
+                console.warn('Guacamole.H264CameraRecorder: hardware encoding '
+                        + 'unavailable (failed ' + Math.round(sinceFailure / 1000)
+                        + 's ago), using software encoding');
+                return Promise.resolve('prefer-software');
             }
-            else
-                throw configureError;
-        }
+
+            return VideoEncoder.isConfigSupported(buildConfig('prefer-hardware'))
+                .then(function probed(result) {
+                    if (result && result.supported) {
+                        Guacamole.H264CameraRecorder._hardwareFailedAtMs = 0;
+                        return 'prefer-hardware';
+                    }
+                    Guacamole.H264CameraRecorder._hardwareFailedAtMs = Date.now();
+                    console.warn('Guacamole.H264CameraRecorder: hardware encoding '
+                            + 'still unavailable, using software encoding');
+                    return 'prefer-software';
+                }, function probeFailed() {
+                    Guacamole.H264CameraRecorder._hardwareFailedAtMs = Date.now();
+                    return 'prefer-software';
+                });
+
+        };
+
+        var effectiveEncoderConfig = null;
+
+        /* Choose the encoder preference and configure the encoder. The
+         * frame pump below starts immediately, but drops frames until the
+         * encoder has been configured. */
+        chooseEncoderPreference().then(function configureEncoder(hwPref) {
+
+            var encoderConfig = buildConfig(hwPref);
+            effectiveEncoderConfig = encoderConfig;
+            try {
+                encoder.configure(encoderConfig);
+            }
+            catch (configureError) {
+                if (encoderConfig.colorSpace) {
+                    effectiveEncoderConfig = Object.assign({}, encoderConfig);
+                    delete effectiveEncoderConfig.colorSpace;
+                    encoder.configure(effectiveEncoderConfig);
+                }
+                else
+                    throw configureError;
+            }
+
+            console.info('Guacamole.H264CameraRecorder: encoder configured: '
+                    + JSON.stringify(effectiveEncoderConfig));
+
+        }).catch(function encoderSetupFailed(e) {
+            console.warn('Guacamole.H264CameraRecorder: failed to configure video encoder:', e);
+            stopVideoCapture();
+            if (recorder.onerror)
+                recorder.onerror();
+        });
 
         // Create track processor
-        var track = stream.getVideoTracks()[0];
         reportCapabilities(track);
         processor = new MediaStreamTrackProcessor({ track: track });
         reader = processor.readable.getReader();
@@ -746,7 +846,44 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      *
      * @private
      */
-    var beginVideoCapture = function beginVideoCapture() {
+    var beginVideoCapture = async function beginVideoCapture() {
+
+        /* Check for hardware H.264 support before the first capture, so
+         * that the capture constraints below already reflect software
+         * encoding where applicable. Runtime hardware failures are still
+         * handled by the encoderError fallback. */
+        if (!Guacamole.H264CameraRecorder._hardwareFailedAtMs) {
+            try {
+                var hwProbe = await VideoEncoder.isConfigSupported({
+                    codec: 'avc1.640028',
+                    width: 1280,
+                    height: 720,
+                    framerate: 30,
+                    hardwareAcceleration: 'prefer-hardware',
+                    bitrate: 1250000
+                });
+                if (!hwProbe || !hwProbe.supported) {
+                    Guacamole.H264CameraRecorder._hardwareFailedAtMs = Date.now();
+                    console.warn('Guacamole.H264CameraRecorder: no hardware '
+                            + 'H.264 encoder on this machine, using software encoding');
+                }
+            }
+            catch (probeError) {
+                Guacamole.H264CameraRecorder._hardwareFailedAtMs = Date.now();
+            }
+        }
+
+        /* This session will use software encoding: cap the capture at
+         * 640x480@10. The RDP host requests samples at well under 10 fps in
+         * practice, so capturing faster only produces frames which are
+         * ultimately discarded server-side. Never scales the format up. */
+        var failedAt = Guacamole.H264CameraRecorder._hardwareFailedAtMs;
+        if (failedAt && (Date.now() - failedAt)
+                < Guacamole.H264CameraRecorder._HW_RETRY_INTERVAL_MS) {
+            if (format.width > 640)          format.width = 640;
+            if (format.height > 480)         format.height = 480;
+            if (format.frameRate > swMaxFps) format.frameRate = swMaxFps;
+        }
 
         // Attempt to retrieve a video input stream from the browser
         var videoConstraints = {
@@ -857,7 +994,10 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      */
     this.start = function start() {
         if (!mediaStream) {
-            beginVideoCapture();
+            beginVideoCapture().catch(function captureStartFailed(e) {
+                console.warn('Guacamole.H264CameraRecorder: failed to begin video capture:', e);
+                streamDenied();
+            });
         }
     };
 
@@ -871,6 +1011,27 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
 };
 
 Guacamole.H264CameraRecorder.prototype = new Guacamole.CameraRecorder();
+
+/**
+ * The time of the most recent fatal hardware encoder error, in milliseconds
+ * since the epoch, or 0 if hardware encoding has not failed. New capture
+ * sessions use software encoding while the failure is recent (see
+ * _HW_RETRY_INTERVAL_MS), after which hardware support is re-probed.
+ *
+ * @private
+ * @type {number}
+ */
+Guacamole.H264CameraRecorder._hardwareFailedAtMs = 0;
+
+/**
+ * How long, in milliseconds, software encoding is used after a hardware
+ * encoder failure before hardware support is re-probed.
+ *
+ * @private
+ * @constant
+ * @type {number}
+ */
+Guacamole.H264CameraRecorder._HW_RETRY_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * Determines whether the given mimetype is supported by
