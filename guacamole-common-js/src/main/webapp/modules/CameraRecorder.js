@@ -484,6 +484,50 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
     var writer = new Guacamole.ArrayBufferWriter(stream);
 
     /**
+     * The Guacamole output stream underlying this recorder. Kept under a
+     * distinct name, as the getUserMedia callback parameter shadows
+     * "stream" within streamReceived().
+     *
+     * @private
+     * @type {!Guacamole.OutputStream}
+     */
+    var guacStream = stream;
+
+    /**
+     * The maximum number of unacknowledged blobs tolerated before frames
+     * are dropped rather than encoded. Eight blobs is roughly half a second
+     * of video at 800 kbps.
+     *
+     * @private
+     * @constant
+     * @type {number}
+     */
+    var BACKPRESSURE_MAX_UNACKED_BLOBS = 8;
+
+    /**
+     * Number of protocol blobs sent on the video stream that have not yet
+     * been acknowledged by the server.
+     *
+     * @private
+     * @type {number}
+     */
+    var unackedBlobs = 0;
+
+    /**
+     * Whether frames are currently being skipped due to link congestion.
+     * Used only to log state transitions.
+     *
+     * @private
+     * @type {boolean}
+     */
+    var backpressured = false;
+
+    writer.onack = function blobAcknowledged(status) {
+        if (unackedBlobs > 0)
+            unackedBlobs--;
+    };
+
+    /**
      * Builds the RDPECAM frame header.
      *
      * @private
@@ -630,7 +674,8 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
 
                 var payloadBuffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payloadSize);
                 var frameData = concatBuffers(header, payloadBuffer);
-                
+
+                unackedBlobs += Math.ceil(frameData.byteLength / writer.blobLength);
                 writer.sendData(frameData);
         };
 
@@ -804,15 +849,44 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         reader = processor.readable.getReader();
 
         /* Encoding loop. Frames are dropped (but always closed) while the
-         * encoder is unavailable. The loop ends when the reader is canceled
-         * by stopVideoCapture(). */
+         * encoder is unavailable or the link is congested. The loop ends
+         * when the reader is canceled by stopVideoCapture(). */
         (async function() {
             while (true) {
                 var result = await reader.read();
                 if (result.done) break;
                 var frame = result.value;
                 try {
-                    if (encoder && encoder.state === 'configured') {
+
+                    /* Data held by the video-delay feature is unacknowledged
+                     * but is not congestion. Raise the limit by the amount
+                     * the configured delay keeps in flight. */
+                    var delayMs = (typeof guacStream.getVideoDelayMs === 'function')
+                            ? guacStream.getVideoDelayMs() : 0;
+                    var bitrate = (effectiveEncoderConfig && effectiveEncoderConfig.bitrate) || 800000;
+
+                    /* The backlog cannot drain below the delay budget while
+                     * the delay is active (1.5x allows for keyframe bursts),
+                     * so hysteresis applies only to the margin above it. */
+                    var delayBudgetBlobs = delayMs > 0
+                            ? Math.ceil((delayMs / 1000) * bitrate * 1.5 / 8 / writer.blobLength) : 0;
+                    var enterLimit = delayBudgetBlobs + BACKPRESSURE_MAX_UNACKED_BLOBS;
+                    var exitLimit = delayBudgetBlobs
+                            + Math.floor(BACKPRESSURE_MAX_UNACKED_BLOBS / 2);
+
+                    var congested = backpressured
+                            ? unackedBlobs > exitLimit
+                            : unackedBlobs > enterLimit;
+                    if (congested !== backpressured) {
+                        backpressured = congested;
+                        console.warn('Guacamole.H264CameraRecorder: ' + (congested
+                                ? 'link congested (' + unackedBlobs
+                                    + ' blobs unacknowledged, limit ' + enterLimit
+                                    + '), skipping frames'
+                                : 'link recovered, resuming encoding'));
+                    }
+
+                    if (!congested && encoder && encoder.state === 'configured') {
                         var wantPeriodicIdr = (Date.now() - lastKeyframeWallMs) >= forceIdrIntervalMs;
                         var requestKey = needKeyframe || wantPeriodicIdr;
                         encoder.encode(frame, { keyFrame: !!requestKey });

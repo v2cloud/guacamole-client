@@ -1114,6 +1114,19 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
             index: realStream.index,
 
             /**
+             * Returns the currently-configured video delay in milliseconds.
+             * Used by the recorder to account for data held in the delay
+             * queue when detecting congestion.
+             *
+             * @returns {number}
+             *     The current video delay in milliseconds.
+             */
+            getVideoDelayMs: function getVideoDelayMs() {
+                getVideoDelay();
+                return videoDelayMs;
+            },
+
+            /**
              * Acknowledgement handler (proxied to real stream).
              * Initially null, set by the writer.
              * @type {Function|null}
