@@ -740,7 +740,11 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                     });
                 }
                 catch (e) {
-                    reject(e);
+                    resolve({
+                        deviceId: deviceId,
+                        deviceName: deviceName,
+                        formats: deriveFormatsFromCapabilities({})
+                    });
                 }
                 finally {
                     if (stream) {
@@ -751,7 +755,16 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                     }
                 }
             }).catch(function(error) {
-                reject(error);
+                /* Device is here but won't open (in use, or blocked by
+                 * privacy settings). List it with default formats instead
+                 * of dropping it; we retry the open when capture starts. */
+                console.warn('Camera "' + (deviceName || deviceId)
+                        + '" could not be opened for capability probing:', error);
+                resolve({
+                    deviceId: deviceId,
+                    deviceName: deviceName,
+                    formats: deriveFormatsFromCapabilities({})
+                });
             });
         });
     }
