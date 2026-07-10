@@ -605,6 +605,18 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                 var relativePtsUs = chunk.timestamp - baselinePtsUs;
                 var relativePtsMs = Math.max(0, Math.round(relativePtsUs / 1000));
 
+                /* If source timestamps jump backwards (device reset, resume
+                 * from sleep, etc.), re-baseline such that the outgoing pts
+                 * continues by one frame step. The clamp below would
+                 * otherwise pin all further frames to the same pts. */
+                if (lastOutputPtsMs !== null && relativePtsMs + 1000 < lastOutputPtsMs) {
+                    var frameStepMs = Math.round(1000 / (captureFrameRate || 30));
+                    baselinePtsUs = chunk.timestamp - (lastOutputPtsMs + frameStepMs) * 1000;
+                    relativePtsUs = chunk.timestamp - baselinePtsUs;
+                    relativePtsMs = Math.max(0, Math.round(relativePtsUs / 1000));
+                }
+
+                /* Never emit a pts earlier than the previous frame's. */
                 if (lastOutputPtsMs !== null && relativePtsMs < lastOutputPtsMs)
                     relativePtsMs = lastOutputPtsMs;
 
