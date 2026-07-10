@@ -533,9 +533,16 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      */
     var streamReceived = function streamReceived(stream) {
 
-        // Create video encoder
-        encoder = new VideoEncoder({
-            output: function(chunk, meta) {
+        /**
+         * Whether encoding has already been retried with software encoding
+         * after a fatal encoder error. Only one retry is attempted per
+         * capture session.
+         *
+         * @type {boolean}
+         */
+        var triedSoftwareFallback = false;
+
+        var encoderOutput = function encoderOutput(chunk, meta) {
                 if (meta && meta.decoderConfig && meta.decoderConfig.description)
                     decoderConfig = parseAvccDecoderConfig(meta.decoderConfig.description);
 
@@ -583,11 +590,42 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                 var frameData = concatBuffers(header, payloadBuffer);
                 
                 writer.sendData(frameData);
-            },
-            error: function(e) {
-                if (recorder.onerror)
-                    recorder.onerror();
+        };
+
+        /* Invoked on fatal encoder errors, after which the codec is closed
+         * and unusable. Retry once with software encoding, otherwise stop
+         * the capture entirely. */
+        var encoderError = function encoderError(e) {
+
+            console.warn('Guacamole.H264CameraRecorder: video encoder error:', e);
+
+            if (!triedSoftwareFallback && effectiveEncoderConfig
+                    && effectiveEncoderConfig.hardwareAcceleration !== 'prefer-software') {
+                triedSoftwareFallback = true;
+                try {
+                    effectiveEncoderConfig = Object.assign({}, effectiveEncoderConfig,
+                            { hardwareAcceleration: 'prefer-software' });
+                    encoder = new VideoEncoder({ output: encoderOutput, error: encoderError });
+                    encoder.configure(effectiveEncoderConfig);
+                    requireKeyframe();
+                    console.warn('Guacamole.H264CameraRecorder: retrying with software encoding');
+                    return;
+                }
+                catch (retryError) {
+                    console.warn('Guacamole.H264CameraRecorder: software fallback failed:', retryError);
+                }
             }
+
+            stopVideoCapture();
+            if (recorder.onerror)
+                recorder.onerror();
+
+        };
+
+        // Create video encoder
+        encoder = new VideoEncoder({
+            output: encoderOutput,
+            error: encoderError
         });
 
         // Select appropriate AVC level based on resolution
@@ -653,17 +691,28 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         processor = new MediaStreamTrackProcessor({ track: track });
         reader = processor.readable.getReader();
 
-        // Start encoding loop
+        /* Encoding loop. Frames are dropped (but always closed) while the
+         * encoder is unavailable. The loop ends when the reader is canceled
+         * by stopVideoCapture(). */
         (async function() {
             while (true) {
                 var result = await reader.read();
                 if (result.done) break;
-                var wantPeriodicIdr = (Date.now() - lastKeyframeWallMs) >= forceIdrIntervalMs;
-                var requestKey = needKeyframe || wantPeriodicIdr;
-                encoder.encode(result.value, { keyFrame: !!requestKey });
-                result.value.close();
+                var frame = result.value;
+                try {
+                    if (encoder && encoder.state === 'configured') {
+                        var wantPeriodicIdr = (Date.now() - lastKeyframeWallMs) >= forceIdrIntervalMs;
+                        var requestKey = needKeyframe || wantPeriodicIdr;
+                        encoder.encode(frame, { keyFrame: !!requestKey });
+                    }
+                }
+                finally {
+                    frame.close();
+                }
             }
-        })();
+        })().catch(function pumpTerminated(e) {
+            console.warn('Guacamole.H264CameraRecorder: frame pump terminated:', e);
+        });
 
         // Save stream for later cleanup
         mediaStream = stream;
@@ -733,8 +782,18 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         // Attempt graceful shutdown in order: reader, encoder, tracks
         try { if (reader && reader.cancel) reader.cancel(); } catch (e) {}
         try { if (reader && reader.releaseLock) reader.releaseLock(); } catch (e) {}
-        try { if (encoder && encoder.flush) encoder.flush(); } catch (e) {}
-        try { if (encoder && encoder.close) encoder.close(); } catch (e) {}
+
+        /* flush() and close() throw (or return a rejected promise) unless the
+         * codec is still configured — it may already have closed itself on a
+         * fatal encoder error. */
+        try {
+            if (encoder && encoder.state === 'configured') {
+                var flushed = encoder.flush();
+                if (flushed && flushed.catch)
+                    flushed.catch(function ignoreAbortedFlush() {});
+            }
+        } catch (e) {}
+        try { if (encoder && encoder.state !== 'closed') encoder.close(); } catch (e) {}
 
         // Reset PTS baseline and frame tracking so next encoding session starts fresh
         baselinePtsUs = null;
