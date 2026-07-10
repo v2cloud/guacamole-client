@@ -1311,6 +1311,22 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
      * @param {Guacamole.Client} client
      *     The Guacamole client for which camera redirection should be stopped.
      */
+    /**
+     * Requests that the active camera recorder for the given client emit a
+     * keyframe on its next encoded frame. Invoked when the server signals
+     * (via the "camera-keyframe" argv) that it needs a keyframe to resume
+     * decoding.
+     *
+     * @param {Guacamole.Client} client
+     *     The Guacamole client whose camera should emit a keyframe.
+     */
+    function requestKeyframe(client) {
+        var clientId = client && getLocalClientId(client);
+        var recorder = clientId && cameraRecorders[clientId];
+        if (recorder && typeof recorder.requestKeyframe === 'function')
+            recorder.requestKeyframe();
+    }
+
     function stopCamera(client) {
         if (!client) {
             return;
@@ -1465,6 +1481,7 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
         prefetchCapabilities: prefetchCapabilities,
         isSupported: isSupported,
         stopCamera: stopCamera,
+        requestKeyframe: requestKeyframe,
         registerStateCallback: registerStateCallback,
         getVideoDelay: getVideoDelay,
         setVideoDelay: setVideoDelay,

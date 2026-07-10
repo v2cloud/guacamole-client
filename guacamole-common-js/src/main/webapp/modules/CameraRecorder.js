@@ -1094,6 +1094,15 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         stopVideoCapture();
     };
 
+    /**
+     * Requests that the next encoded frame be a keyframe. Invoked when the
+     * server signals that it has discarded buffered frames and needs a
+     * keyframe to resume decoding.
+     */
+    this.requestKeyframe = function requestKeyframe() {
+        requireKeyframe();
+    };
+
 };
 
 Guacamole.H264CameraRecorder.prototype = new Guacamole.CameraRecorder();

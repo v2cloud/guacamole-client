@@ -676,6 +676,12 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                         return;
                     }
 
+                    // Handle server-requested keyframes (sent after dropping frames)
+                    if (name === 'camera-keyframe') {
+                        guacRDPECAM.requestKeyframe(client);
+                        return;
+                    }
+
                     // Alternative concise form: "WIDTHxHEIGHT@FPS_NUM/FPS_DEN#STREAM_INDEX"
                     if (name === 'camera-start') {
                         try {
