@@ -168,6 +168,17 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
     var lastOutputPtsMs = null;
 
     /**
+     * Capture timestamp of the last frame submitted to the encoder, in
+     * microseconds. Initialized such that the first frame is always
+     * encoded, and reset when the encoder is reconfigured or the stream
+     * restarts.
+     *
+     * @private
+     * @type {number}
+     */
+    var lastEncodedTsUs = -Infinity;
+
+    /**
      * Tracks whether capability information has already been reported
      * upstream for this recorder.
      *
@@ -699,6 +710,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                     encoder = new VideoEncoder({ output: encoderOutput, error: encoderError });
                     encoder.configure(effectiveEncoderConfig);
                     requireKeyframe();
+                    lastEncodedTsUs = -Infinity;
                     console.warn('Guacamole.H264CameraRecorder: retrying with software encoding: '
                             + JSON.stringify(effectiveEncoderConfig));
                     return;
@@ -757,6 +769,16 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
             defaultBitrate = 100000;   // 100 kbps for lower resolutions
         }
 
+        /* The target encode rate: software encoding is capped at swMaxFps,
+         * hardware encoding runs at the requested rate. Checked per frame
+         * so that a fallback to software encoding takes effect
+         * immediately. */
+        var targetFpsFor = function targetFpsFor(hwPref) {
+            return (hwPref === 'prefer-software')
+                    ? Math.min(format.frameRate, swMaxFps)
+                    : format.frameRate;
+        };
+
         /* Builds the encoder configuration for the given hardware
          * preference. Software encoding uses realtime latency mode and a
          * lower bitrate, matching the parameters used by the old WebRTC
@@ -767,7 +789,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                 codec: codecFor(hwPref),
                 width: captureWidth,
                 height: captureHeight,
-                framerate: captureFrameRate,
+                framerate: Math.min(captureFrameRate, targetFpsFor(hwPref)),
                 hardwareAcceleration: hwPref,
                 latencyMode: software ? 'realtime' : 'quality',
                 bitrate: software ? swBitrate : defaultBitrate,
@@ -833,6 +855,8 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                     throw configureError;
             }
 
+            lastEncodedTsUs = -Infinity;
+
             console.info('Guacamole.H264CameraRecorder: encoder configured: '
                     + JSON.stringify(effectiveEncoderConfig));
 
@@ -857,6 +881,22 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                 if (result.done) break;
                 var frame = result.value;
                 try {
+
+                    /* Drop frames arriving faster than the target rate. The
+                     * 0.9 factor tolerates capture jitter. Pending keyframe
+                     * requests are unaffected, as needKeyframe is cleared
+                     * only once a keyframe is actually produced. */
+                    var activePref = effectiveEncoderConfig
+                            && effectiveEncoderConfig.hardwareAcceleration;
+                    var minIntervalUs = 0.9 * (1000000 / targetFpsFor(activePref));
+                    if (frame.timestamp - lastEncodedTsUs < minIntervalUs)
+                        continue;
+
+                    /* Drop frames while the encoder itself is backed up,
+                     * which can happen when a software encoder takes over a
+                     * capture originally sized for hardware encoding. */
+                    if (encoder && encoder.encodeQueueSize > 2)
+                        continue;
 
                     /* Data held by the video-delay feature is unacknowledged
                      * but is not congestion. Raise the limit by the amount
@@ -890,6 +930,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                         var wantPeriodicIdr = (Date.now() - lastKeyframeWallMs) >= forceIdrIntervalMs;
                         var requestKey = needKeyframe || wantPeriodicIdr;
                         encoder.encode(frame, { keyFrame: !!requestKey });
+                        lastEncodedTsUs = frame.timestamp;
                     }
                 }
                 finally {
@@ -975,7 +1016,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         var videoConstraints = {
             width: format.width,
             height: format.height,
-            frameRate: format.frameRate
+            frameRate: { ideal: format.frameRate, max: format.frameRate }
         };
         if (format.deviceId) {
             try {
@@ -1052,7 +1093,8 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
     this.resetTimeline = function resetTimeline() {
         baselinePtsUs = null;
         lastOutputPtsMs = null;
-        
+        lastEncodedTsUs = -Infinity;
+
         requireKeyframe();
     };
 
