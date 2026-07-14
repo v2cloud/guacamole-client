@@ -505,15 +505,65 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
     var guacStream = stream;
 
     /**
-     * The maximum number of unacknowledged blobs tolerated before frames
-     * are dropped rather than encoded. Eight blobs is roughly half a second
-     * of video at 800 kbps.
+     * The number of unacknowledged blobs tolerated beyond one whole frame
+     * (see maxFrameBlobs) before frames are dropped rather than encoded.
+     * Eight blobs is roughly half a second of video at 800 kbps.
      *
      * @private
      * @constant
      * @type {number}
      */
     var BACKPRESSURE_MAX_UNACKED_BLOBS = 8;
+
+    /**
+     * Tuning for congestion-adaptive quality. While congestion persists, the
+     * encoder bitrate and frame rate are stepped down. Once the link has
+     * been clear for a while, they are ramped back up. The resolution
+     * negotiated with the RDP host is never changed. Step-down is
+     * multiplicative and recovery is additive, so quality drops quickly and
+     * returns slowly. The step logic is in
+     * Guacamole.H264CameraRecorder._stepQuality. The floors and the
+     * keyframe-request sensitivity can be overridden via
+     * window.GUAC_RDPECAM_ADAPTIVE_MIN_BITRATE, _ADAPTIVE_MIN_FPS and
+     * _ADAPTIVE_KEYFRAME_REQ_COUNT.
+     *
+     * @private
+     * @constant
+     */
+    var ADAPTIVE_STEP_DOWN = 0.7;               // qualityScale multiplier per step down
+    var ADAPTIVE_STEP_UP = 0.1;                 // qualityScale increment per recovery step
+    var ADAPTIVE_MIN_SCALE = 0.25;              // floor for qualityScale
+    var ADAPTIVE_ADJUST_INTERVAL_MS = 1000;     // min time between reconfigures
+    var ADAPTIVE_RECOVER_MS = 4000;             // must be clear this long before stepping up
+    var ADAPTIVE_KEYFRAME_REQ_WINDOW_MS = 2000; // window for counting host keyframe requests
+
+    // 150 kbps bitrate floor
+    var ADAPTIVE_MIN_BITRATE = (typeof window !== 'undefined' && window.GUAC_RDPECAM_ADAPTIVE_MIN_BITRATE) ?
+            (parseInt(window.GUAC_RDPECAM_ADAPTIVE_MIN_BITRATE, 10) || 150000) : 150000;
+
+    // fps floor
+    var ADAPTIVE_MIN_FPS = (typeof window !== 'undefined' && window.GUAC_RDPECAM_ADAPTIVE_MIN_FPS) ?
+            (parseInt(window.GUAC_RDPECAM_ADAPTIVE_MIN_FPS, 10) || 5) : 5;
+
+    // >= this many host keyframe requests in the window = consumer overflow
+    var ADAPTIVE_KEYFRAME_REQ_COUNT = (typeof window !== 'undefined' && window.GUAC_RDPECAM_ADAPTIVE_KEYFRAME_REQ_COUNT) ?
+            (parseInt(window.GUAC_RDPECAM_ADAPTIVE_KEYFRAME_REQ_COUNT, 10) || 2) : 2;
+
+    /**
+     * The adaptive tuning values above, bundled for
+     * Guacamole.H264CameraRecorder._stepQuality.
+     *
+     * @private
+     * @constant
+     * @type {Object}
+     */
+    var adaptiveTuning = {
+        stepDown: ADAPTIVE_STEP_DOWN,
+        stepUp: ADAPTIVE_STEP_UP,
+        minScale: ADAPTIVE_MIN_SCALE,
+        adjustIntervalMs: ADAPTIVE_ADJUST_INTERVAL_MS,
+        recoverMs: ADAPTIVE_RECOVER_MS
+    };
 
     /**
      * Number of protocol blobs sent on the video stream that have not yet
@@ -532,6 +582,33 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      * @type {boolean}
      */
     var backpressured = false;
+
+    /**
+     * The largest single frame sent so far, in protocol blobs. The
+     * congestion window must have room for at least one whole frame: a 720p
+     * keyframe alone exceeds BACKPRESSURE_MAX_UNACKED_BLOBS, and without
+     * this allowance a single keyframe would count as permanent congestion
+     * and freeze the stream.
+     *
+     * @private
+     * @type {number}
+     */
+    var maxFrameBlobs = 0;
+
+    /**
+     * Timestamps, in milliseconds, of recent keyframe requests from the RDP
+     * host. The host requests a keyframe whenever its sink queue overflows,
+     * which happens when frames are produced faster than it consumes them.
+     * Several requests within ADAPTIVE_KEYFRAME_REQ_WINDOW_MS therefore
+     * indicate congestion that unackedBlobs cannot detect, as guacd
+     * acknowledges blobs on receipt, before they reach its queue. Kept at
+     * instance scope, rather than with the other adaptive state in the
+     * capture session, because it is written by requestKeyframe().
+     *
+     * @private
+     * @type {number[]}
+     */
+    var keyframeRequestTimes = [];
 
     writer.onack = function blobAcknowledged(status) {
         if (unackedBlobs > 0)
@@ -686,7 +763,11 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                 var payloadBuffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payloadSize);
                 var frameData = concatBuffers(header, payloadBuffer);
 
-                unackedBlobs += Math.ceil(frameData.byteLength / writer.blobLength);
+                var frameBlobs = Math.ceil(frameData.byteLength / writer.blobLength);
+                if (frameBlobs > maxFrameBlobs)
+                    maxFrameBlobs = frameBlobs;
+
+                unackedBlobs += frameBlobs;
                 writer.sendData(frameData);
         };
 
@@ -709,6 +790,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                     effectiveEncoderConfig = buildConfig('prefer-software');
                     encoder = new VideoEncoder({ output: encoderOutput, error: encoderError });
                     encoder.configure(effectiveEncoderConfig);
+                    noteEncoderBaseline(effectiveEncoderConfig);
                     requireKeyframe();
                     lastEncodedTsUs = -Infinity;
                     console.warn('Guacamole.H264CameraRecorder: retrying with software encoding: '
@@ -835,6 +917,78 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
 
         var effectiveEncoderConfig = null;
 
+        /* Congestion-adaptive quality state (see the ADAPTIVE_* constants).
+         * Degrades bitrate/fps under sustained congestion and recovers when
+         * the link clears, within the negotiated resolution. */
+        var qualityScale = 1;
+        var baseBitrate = null;
+        var adaptiveFps = null;
+        var lastCongestedMs = 0;
+        var lastQualityAdjustMs = 0;
+
+        /* Records the full-quality baseline for a freshly configured encoder
+         * and resets adaptation to full quality. */
+        var noteEncoderBaseline = function noteEncoderBaseline(config) {
+            baseBitrate = (config && config.bitrate) || null;
+            qualityScale = 1;
+            adaptiveFps = null;
+            lastCongestedMs = 0;
+            lastQualityAdjustMs = 0;
+        };
+
+        /* Applies the current qualityScale to the running encoder by lowering
+         * or restoring its target bitrate and frame rate. If the encoder is
+         * not ready or reconfiguration fails, qualityScale is rolled back to
+         * prevScale so the tracked scale continues to match what the encoder
+         * is actually running. The rate-limit clock is still consumed in
+         * that case, limiting retries to one per adjustment interval. */
+        var applyAdaptiveQuality = function applyAdaptiveQuality(nowMs, prevScale) {
+            lastQualityAdjustMs = nowMs;
+            if (!encoder || encoder.state !== 'configured'
+                    || baseBitrate === null || !effectiveEncoderConfig) {
+                qualityScale = prevScale;
+                return;
+            }
+
+            var newBitrate = Math.max(ADAPTIVE_MIN_BITRATE,
+                    Math.round(baseBitrate * qualityScale));
+            var newFps = Math.max(ADAPTIVE_MIN_FPS,
+                    Math.round(targetFpsFor(effectiveEncoderConfig.hardwareAcceleration)
+                        * qualityScale));
+
+            /* Nothing to reconfigure; both values are unchanged, typically
+             * because they are clamped at their floors. The new scale
+             * stands. */
+            if (effectiveEncoderConfig.bitrate === newBitrate
+                    && effectiveEncoderConfig.framerate === newFps)
+                return;
+
+            var newConfig = Object.assign({}, effectiveEncoderConfig, {
+                bitrate: newBitrate,
+                framerate: newFps
+            });
+            try {
+                encoder.configure(newConfig);
+                effectiveEncoderConfig = newConfig;
+                adaptiveFps = (qualityScale < 1) ? newFps : null;
+
+                /* A keyframe is not required after a bitrate/fps change (the
+                 * P-frame chain remains valid), but requesting one gives the
+                 * decoder a clean sync point and covers encoders that fully
+                 * reset on reconfigure. Costs at most one IDR per
+                 * adjustment. */
+                requireKeyframe();
+
+                console.debug('Guacamole.H264CameraRecorder: adaptive quality '
+                        + Math.round(qualityScale * 100) + '% ('
+                        + Math.round(newBitrate / 1000) + ' kbps, ' + newFps + ' fps)');
+            }
+            catch (e) {
+                qualityScale = prevScale;
+                console.warn('Guacamole.H264CameraRecorder: adaptive reconfigure failed:', e);
+            }
+        };
+
         /* Choose the encoder preference and configure the encoder. The
          * frame pump below starts immediately, but drops frames until the
          * encoder has been configured. */
@@ -842,6 +996,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
 
             var encoderConfig = buildConfig(hwPref);
             effectiveEncoderConfig = encoderConfig;
+            noteEncoderBaseline(encoderConfig);
             try {
                 encoder.configure(encoderConfig);
             }
@@ -888,7 +1043,8 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                      * only once a keyframe is actually produced. */
                     var activePref = effectiveEncoderConfig
                             && effectiveEncoderConfig.hardwareAcceleration;
-                    var minIntervalUs = 0.9 * (1000000 / targetFpsFor(activePref));
+                    var targetFps = adaptiveFps || targetFpsFor(activePref);
+                    var minIntervalUs = 0.9 * (1000000 / targetFps);
                     if (frame.timestamp - lastEncodedTsUs < minIntervalUs)
                         continue;
 
@@ -910,20 +1066,55 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                      * so hysteresis applies only to the margin above it. */
                     var delayBudgetBlobs = delayMs > 0
                             ? Math.ceil((delayMs / 1000) * bitrate * 1.5 / 8 / writer.blobLength) : 0;
-                    var enterLimit = delayBudgetBlobs + BACKPRESSURE_MAX_UNACKED_BLOBS;
-                    var exitLimit = delayBudgetBlobs
-                            + Math.floor(BACKPRESSURE_MAX_UNACKED_BLOBS / 2);
 
-                    var congested = backpressured
-                            ? unackedBlobs > exitLimit
-                            : unackedBlobs > enterLimit;
+                    /* The window allows one whole frame beyond the
+                     * steady-state budget so that a single large keyframe is
+                     * not itself read as congestion. See _congestionLimits
+                     * and _isCongested. */
+                    var limits = Guacamole.H264CameraRecorder._congestionLimits(
+                            delayBudgetBlobs, maxFrameBlobs,
+                            BACKPRESSURE_MAX_UNACKED_BLOBS);
+                    var congested = Guacamole.H264CameraRecorder._isCongested(
+                            unackedBlobs, backpressured, limits);
                     if (congested !== backpressured) {
                         backpressured = congested;
                         console.warn('Guacamole.H264CameraRecorder: ' + (congested
                                 ? 'link congested (' + unackedBlobs
-                                    + ' blobs unacknowledged, limit ' + enterLimit
+                                    + ' blobs unacknowledged, limit ' + limits.enter
                                     + '), skipping frames'
                                 : 'link recovered, resuming encoding'));
+                    }
+
+                    /* Congestion-adaptive quality: step bitrate/fps down while
+                     * congestion persists, ramp back up after the link has been
+                     * clear for a while. Rate-limited to one reconfigure per
+                     * ADAPTIVE_ADJUST_INTERVAL_MS. */
+                    var nowMs = Date.now();
+
+                    /* The RDP host requests a keyframe on every sink-queue
+                     * overflow, so repeated requests mean frames are being
+                     * produced faster than the host consumes them. That is
+                     * not visible in unackedBlobs (guacd acknowledges before
+                     * its queue), so treat it as congestion here; reducing
+                     * fps brings production back down to the consumer's
+                     * rate. */
+                    while (keyframeRequestTimes.length
+                            && nowMs - keyframeRequestTimes[0] > ADAPTIVE_KEYFRAME_REQ_WINDOW_MS)
+                        keyframeRequestTimes.shift();
+                    var consumerCongested =
+                            keyframeRequestTimes.length >= ADAPTIVE_KEYFRAME_REQ_COUNT;
+
+                    var stepped = Guacamole.H264CameraRecorder._stepQuality({
+                        qualityScale: qualityScale,
+                        lastCongestedMs: lastCongestedMs,
+                        lastQualityAdjustMs: lastQualityAdjustMs
+                    }, congested || consumerCongested, nowMs, adaptiveTuning);
+
+                    lastCongestedMs = stepped.lastCongestedMs;
+                    if (stepped.changed) {
+                        var prevScale = qualityScale;
+                        qualityScale = stepped.qualityScale;
+                        applyAdaptiveQuality(nowMs, prevScale);
                     }
 
                     if (!congested && encoder && encoder.state === 'configured') {
@@ -1142,6 +1333,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      * keyframe to resume decoding.
      */
     this.requestKeyframe = function requestKeyframe() {
+        keyframeRequestTimes.push(Date.now());
         requireKeyframe();
     };
 
@@ -1169,6 +1361,115 @@ Guacamole.H264CameraRecorder._hardwareFailedAtMs = 0;
  * @type {number}
  */
 Guacamole.H264CameraRecorder._HW_RETRY_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Computes the congestion window limits for the encoding loop. The window is
+ * the sum of the video-delay budget (data intentionally held in flight by
+ * the delay feature), the largest single frame seen so far, and the
+ * steady-state back-pressure budget. Room for one whole frame is required
+ * because a keyframe at 720p or above exceeds the steady-state budget by
+ * itself; a regression here previously froze camera streams above 640x480.
+ * The exit limit keeps half the budget as hysteresis margin.
+ *
+ * @private
+ * @param {!number} delayBudgetBlobs
+ *     Blobs held in flight by the video-delay feature.
+ *
+ * @param {!number} maxFrameBlobs
+ *     The largest single frame observed this session, in blobs.
+ *
+ * @param {!number} budgetBlobs
+ *     The steady-state back-pressure budget, in blobs.
+ *
+ * @returns {!{enter: number, exit: number}}
+ *     The unacknowledged-blob counts above which congestion is entered, and
+ *     down to which it must drain before congestion is exited.
+ */
+Guacamole.H264CameraRecorder._congestionLimits = function _congestionLimits(
+        delayBudgetBlobs, maxFrameBlobs, budgetBlobs) {
+    return {
+        enter: delayBudgetBlobs + maxFrameBlobs + budgetBlobs,
+        exit:  delayBudgetBlobs + maxFrameBlobs + Math.floor(budgetBlobs / 2)
+    };
+};
+
+/**
+ * Determines whether the link is congested, applying hysteresis: congestion
+ * is entered above the enter limit and only exited once the backlog drains
+ * below the (lower) exit limit.
+ *
+ * @private
+ * @param {!number} unackedBlobs
+ *     Blobs sent but not yet acknowledged by the server.
+ *
+ * @param {!boolean} backpressured
+ *     Whether the link is currently considered congested.
+ *
+ * @param {!{enter: number, exit: number}} limits
+ *     The limits computed by _congestionLimits.
+ *
+ * @returns {!boolean}
+ *     true if the link should be considered congested, false otherwise.
+ */
+Guacamole.H264CameraRecorder._isCongested = function _isCongested(
+        unackedBlobs, backpressured, limits) {
+    return backpressured
+            ? unackedBlobs > limits.exit
+            : unackedBlobs > limits.enter;
+};
+
+/**
+ * Advances the adaptive-quality state machine by one tick. While overloaded,
+ * the quality scale is stepped down multiplicatively. Once the link has been
+ * clear of overload for tuning.recoverMs, it is stepped back up additively.
+ * Steps are rate-limited to one per tuning.adjustIntervalMs.
+ *
+ * @private
+ * @param {!{qualityScale: number, lastCongestedMs: number,
+ *          lastQualityAdjustMs: number}} state
+ *     The current adaptive-quality state.
+ *
+ * @param {!boolean} overloaded
+ *     Whether link congestion or consumer overflow is currently detected.
+ *
+ * @param {!number} nowMs
+ *     The current time, in milliseconds.
+ *
+ * @param {!{stepDown: number, stepUp: number, minScale: number,
+ *          adjustIntervalMs: number, recoverMs: number}} tuning
+ *     The adaptive tuning constants.
+ *
+ * @returns {!{qualityScale: number, lastCongestedMs: number, changed: boolean}}
+ *     The next state, with changed set if the scale moved and should be
+ *     applied to the encoder.
+ */
+Guacamole.H264CameraRecorder._stepQuality = function _stepQuality(
+        state, overloaded, nowMs, tuning) {
+
+    var next = {
+        qualityScale: state.qualityScale,
+        lastCongestedMs: state.lastCongestedMs,
+        changed: false
+    };
+
+    if (overloaded) {
+        next.lastCongestedMs = nowMs;
+        if (state.qualityScale > tuning.minScale
+                && nowMs - state.lastQualityAdjustMs >= tuning.adjustIntervalMs) {
+            next.qualityScale = Math.max(tuning.minScale,
+                    state.qualityScale * tuning.stepDown);
+            next.changed = true;
+        }
+    }
+    else if (state.qualityScale < 1
+            && nowMs - state.lastCongestedMs >= tuning.recoverMs
+            && nowMs - state.lastQualityAdjustMs >= tuning.adjustIntervalMs) {
+        next.qualityScale = Math.min(1, state.qualityScale + tuning.stepUp);
+        next.changed = true;
+    }
+
+    return next;
+};
 
 /**
  * Determines whether the given mimetype is supported by
