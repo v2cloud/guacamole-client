@@ -88,6 +88,33 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
     var deviceChangeHandlerUsesAddEventListener = false;
 
     /**
+     * Debounce timer for devicechange events, and how long to wait after the
+     * last event before re-enumerating. Opening or closing a physical camera
+     * can raise several device events in quick succession; re-enumerating
+     * once after the burst is enough.
+     */
+    var deviceChangeDebounceTimer = null;
+    var DEVICE_CHANGE_DEBOUNCE_MS = 500;
+
+    /**
+     * Whether a camera enumeration is currently running, and whether another
+     * one was requested while it ran. Enumerations must not overlap: probing
+     * opens cameras, and opening a physical camera can raise further
+     * devicechange events.
+     */
+    var enumerationInProgress = false;
+    var enumerationQueued = false;
+
+    /**
+     * The most recently sent capability payload and the client it was sent
+     * for. guacd tears down and re-advertises every device channel on each
+     * capability payload it receives, even an unchanged one, which the RDP
+     * host sees as every camera disappearing and reappearing. Identical
+     * payloads are skipped.
+     */
+    var lastSentCapabilities = { clientId: null, payload: null };
+
+    /**
      * Callbacks to notify when camera registry changes (for UI updates).
      *
      * @type {Array.<Function>}
@@ -159,10 +186,32 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
             }
         }
 
+        if (deviceChangeDebounceTimer) {
+            clearTimeout(deviceChangeDebounceTimer);
+            deviceChangeDebounceTimer = null;
+        }
+
         deviceChangeHandler = null;
         deviceChangeListenerClientId = null;
         previousOnDeviceChangeHandler = null;
         deviceChangeHandlerUsesAddEventListener = false;
+    }
+
+    /**
+     * Schedules a camera enumeration for the current client after the
+     * devicechange debounce interval, restarting the timer if further events
+     * arrive in the meantime.
+     *
+     * @private
+     */
+    function scheduleEnumeration() {
+        if (deviceChangeDebounceTimer)
+            clearTimeout(deviceChangeDebounceTimer);
+        deviceChangeDebounceTimer = setTimeout(function() {
+            deviceChangeDebounceTimer = null;
+            if (currentClient)
+                enumerateAndUpdateCameras(currentClient);
+        }, DEVICE_CHANGE_DEBOUNCE_MS);
     }
 
     /**
@@ -188,8 +237,7 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
 
         if (typeof navigator.mediaDevices.addEventListener === 'function') {
             deviceChangeHandler = function() {
-                if (currentClient)
-                    enumerateAndUpdateCameras(currentClient);
+                scheduleEnumeration();
             };
             navigator.mediaDevices.addEventListener('devicechange', deviceChangeHandler);
             deviceChangeHandlerUsesAddEventListener = true;
@@ -200,8 +248,7 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
             deviceChangeHandler = function(event) {
                 if (typeof previousOnDeviceChangeHandler === 'function')
                     previousOnDeviceChangeHandler.call(this, event);
-                if (currentClient)
-                    enumerateAndUpdateCameras(currentClient);
+                scheduleEnumeration();
             };
             navigator.mediaDevices.ondevicechange = deviceChangeHandler;
             deviceChangeHandlerUsesAddEventListener = false;
@@ -329,15 +376,22 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
         if (!client)
             return;
 
+        var clientId = getLocalClientId(client);
         var enabledCameras = getEnabledCameras();
 
         // If no cameras are enabled, send empty string
         if (enabledCameras.length === 0) {
+            // Already advertised as empty; see lastSentCapabilities
+            if (lastSentCapabilities.clientId === clientId
+                    && lastSentCapabilities.payload === '')
+                return;
             try {
                 var stream = client.createArgumentValueStream('text/plain', 'rdpecam-capabilities-update');
                 var writer = new Guacamole.StringWriter(stream);
                 writer.sendText('');
                 writer.sendEnd();
+                lastSentCapabilities.clientId = clientId;
+                lastSentCapabilities.payload = '';
             }
             catch (e) {
                 // Unable to send capability update - ignore
@@ -380,10 +434,17 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
 
             var payload = deviceEntries.join(';');
 
+            // Already advertised; see lastSentCapabilities
+            if (lastSentCapabilities.clientId === clientId
+                    && lastSentCapabilities.payload === payload)
+                return;
+
             var stream = client.createArgumentValueStream('text/plain', 'rdpecam-capabilities-update');
             var writer = new Guacamole.StringWriter(stream);
             writer.sendText(payload);
             writer.sendEnd();
+            lastSentCapabilities.clientId = clientId;
+            lastSentCapabilities.payload = payload;
         }
         catch (e) {
             // Unable to send capability update - ignore
@@ -491,10 +552,18 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
 
             var payload = deviceEntries.join(';');
 
+            // Already advertised; see lastSentCapabilities
+            var clientId = getLocalClientId(client);
+            if (lastSentCapabilities.clientId === clientId
+                    && lastSentCapabilities.payload === payload)
+                return;
+
             var stream = client.createArgumentValueStream('text/plain', 'rdpecam-capabilities');
             var writer = new Guacamole.StringWriter(stream);
             writer.sendText(payload);
             writer.sendEnd();
+            lastSentCapabilities.clientId = clientId;
+            lastSentCapabilities.payload = payload;
         }
         catch (e) {
             // Unable to advertise camera capabilities - ignore
@@ -533,6 +602,23 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
         if (typeof navigator.mediaDevices.enumerateDevices !== 'function')
             return;
 
+        /* Coalesce overlapping requests. Probing is slow and can raise
+         * further devicechange events, so a request arriving mid-enumeration
+         * is queued and handled by one trailing pass. */
+        if (enumerationInProgress) {
+            enumerationQueued = true;
+            return;
+        }
+        enumerationInProgress = true;
+
+        var finishEnumeration = function finishEnumeration() {
+            enumerationInProgress = false;
+            if (enumerationQueued) {
+                enumerationQueued = false;
+                enumerateAndUpdateCameras(currentClient || client);
+            }
+        };
+
         navigator.mediaDevices.enumerateDevices()
             .then(function(devices) {
                 var videoDevices = devices.filter(function(device) {
@@ -543,6 +629,7 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                     // No cameras detected, clear registry
                     cameraRegistry = {};
                     notifyRegistryChange();
+                    finishEnumeration();
                     return;
                 }
 
@@ -553,6 +640,10 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                 // If browsers redact device IDs prior to permission being granted,
                 // request access once and retry enumeration so that prompting occurs.
                 if (!hasUsableDeviceIds) {
+                    /* The retry below is a full enumeration and also covers
+                     * any queued request. */
+                    enumerationInProgress = false;
+                    enumerationQueued = false;
                     requestCameraPermission().then(function() {
                         enumerateAndUpdateCameras(client);
                     }).catch(function(error) {
@@ -563,8 +654,21 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                     return;
                 }
 
-                // Probe capabilities for each device
+                /* Probe capabilities for each device. Devices already in the
+                 * registry reuse their cached formats: probing opens the
+                 * camera via getUserMedia, and opening a physical camera can
+                 * raise devicechange events that would re-trigger enumeration
+                 * in a loop. A device's formats do not change while it
+                 * remains present. */
                 var devicePromises = videoDevices.map(function(deviceInfo) {
+                    var known = cameraRegistry[deviceInfo.deviceId];
+                    if (known && known.formats && known.formats.length) {
+                        return Promise.resolve({
+                            deviceId: deviceInfo.deviceId,
+                            deviceName: deviceInfo.label || known.label,
+                            formats: known.formats
+                        });
+                    }
                     return probeDeviceCapabilities(deviceInfo.deviceId, deviceInfo.label || '');
                 });
 
@@ -577,6 +681,7 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                     if (validDevices.length === 0) {
                         cameraRegistry = {};
                         notifyRegistryChange();
+                        finishEnumeration();
                         return;
                     }
 
@@ -649,17 +754,21 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
                     // Notify UI
                     notifyRegistryChange();
 
+                    finishEnumeration();
+
                 }).catch(function(error) {
                     // Error probing device capabilities - log error and clear registry
                     console.error('Error probing camera capabilities:', error);
                     cameraRegistry = {};
                     notifyRegistryChange();
+                    finishEnumeration();
                 });
             }).catch(function(error) {
                 // Error enumerating devices - log error and clear registry
                 console.error('Error enumerating camera devices:', error);
                 cameraRegistry = {};
                 notifyRegistryChange();
+                finishEnumeration();
             });
     }
 
