@@ -109,8 +109,12 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
      * The most recently sent capability payload and the client it was sent
      * for. guacd tears down and re-advertises every device channel on each
      * capability payload it receives, even an unchanged one, which the RDP
-     * host sees as every camera disappearing and reappearing. Identical
-     * payloads are skipped.
+     * host sees as every camera disappearing and reappearing. Enumeration
+     * therefore skips re-sending an identical payload. Explicit updates
+     * (toggles, and the extension's post-connect sync) always send: the
+     * first advertisement is often lost while guacd's camera plugin is
+     * still starting, and re-sending the same payload is what recovers
+     * from that.
      */
     var lastSentCapabilities = { clientId: null, payload: null };
 
@@ -381,10 +385,6 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
 
         // If no cameras are enabled, send empty string
         if (enabledCameras.length === 0) {
-            // Already advertised as empty; see lastSentCapabilities
-            if (lastSentCapabilities.clientId === clientId
-                    && lastSentCapabilities.payload === '')
-                return;
             try {
                 var stream = client.createArgumentValueStream('text/plain', 'rdpecam-capabilities-update');
                 var writer = new Guacamole.StringWriter(stream);
@@ -433,11 +433,6 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
             }
 
             var payload = deviceEntries.join(';');
-
-            // Already advertised; see lastSentCapabilities
-            if (lastSentCapabilities.clientId === clientId
-                    && lastSentCapabilities.payload === payload)
-                return;
 
             var stream = client.createArgumentValueStream('text/plain', 'rdpecam-capabilities-update');
             var writer = new Guacamole.StringWriter(stream);
@@ -1228,6 +1223,16 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
         // Initialize queue for this client
         delayQueues[clientId] = [];
 
+        /**
+         * Whether the stream has already been ended. Ending a stream
+         * returns its index to the client's pool, so a second "end" (the
+         * recorder and its stop function both end the stream) could close
+         * a newer stream that has since been given the same index.
+         *
+         * @type {boolean}
+         */
+        var ended = false;
+
         var delayedStream = {
             /**
              * The stream index (proxied from real stream).
@@ -1263,6 +1268,11 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
              *     Base64-encoded blob data to send.
              */
             sendBlob: function(data) {
+                // A blob written after end would land on a freed (and
+                // possibly reused) stream index
+                if (ended)
+                    return;
+
                 // Load current delay from preferenceService
                 getVideoDelay();
 
@@ -1294,6 +1304,9 @@ angular.module('client').factory('guacRDPECAM', ['$injector', function guacRDPEC
              * Also clears the delay queue and stops the timer.
              */
             sendEnd: function() {
+                if (ended)
+                    return;
+                ended = true;
                 stopQueueTimer(clientId);
                 clearDelayQueue(clientId);
                 realStream.sendEnd();

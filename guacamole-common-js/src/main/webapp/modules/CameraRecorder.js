@@ -406,12 +406,70 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
 
 
     /**
+     * Whether stop() has been called on this recorder. The getUserMedia()
+     * request may still be pending when the recorder is stopped, in which
+     * case there is no capture to tear down yet. Without this flag the
+     * capture then starts anyway once getUserMedia() resolves, holding the
+     * camera open and encoding into the already-ended stream, whose blobs
+     * are never acknowledged.
+     *
+     * @private
+     * @type {boolean}
+     */
+    var stopped = false;
+
+    /**
+     * Whether start() has been called on this recorder. Each recorder
+     * drives a single capture; see start().
+     *
+     * @private
+     * @type {boolean}
+     */
+    var captureRequested = false;
+
+    /**
+     * Whether the underlying Guacamole stream has been ended. The "end"
+     * instruction must be sent exactly once: the stream index is returned
+     * to the client's pool on the first send, so a repeat send could end a
+     * newer stream that has since been given the same index.
+     *
+     * @private
+     * @type {boolean}
+     */
+    var streamEnded = false;
+
+    /**
      * Whether to force the next frame to be a keyframe.
      *
      * @private
      * @type {boolean}
      */
     var needKeyframe = true;
+
+    /**
+     * Whether a forced keyframe has been submitted to the encoder but its
+     * output has not yet been observed. The encoder pipelines several
+     * frames, so without this guard every frame submitted before the first
+     * keyframe comes back is also forced, and each stream opens with a
+     * burst of consecutive IDR frames. The Windows decoder rejects those
+     * (see lastKeyframeWallMs), and at 720p and above the burst alone
+     * overruns the congestion window before any acks can return.
+     *
+     * @private
+     * @type {boolean}
+     */
+    var keyframePending = false;
+
+    /**
+     * When the currently pending forced keyframe was submitted, in
+     * milliseconds. If its output never arrives (the encoder may drop
+     * queued frames when reconfigured), the pending flag is dropped after
+     * forceIdrIntervalMs so keyframes can be requested again.
+     *
+     * @private
+     * @type {number}
+     */
+    var keyframePendingSinceMs = 0;
 
     /**
      * Interval in milliseconds to request periodic IDR frames.
@@ -473,6 +531,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      */
     var markKeyframeObserved = function markKeyframeObserved() {
         needKeyframe = false;
+        keyframePending = false;
         lastKeyframeWallMs = Date.now();
     };
 
@@ -616,6 +675,19 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
     };
 
     /**
+     * Ends the underlying Guacamole stream, if it has not been ended
+     * already. See streamEnded.
+     *
+     * @private
+     */
+    var endStreamOnce = function endStreamOnce() {
+        if (streamEnded)
+            return;
+        streamEnded = true;
+        writer.sendEnd();
+    };
+
+    /**
      * Builds the RDPECAM frame header.
      *
      * @private
@@ -685,6 +757,17 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      */
     var streamReceived = function streamReceived(stream) {
 
+        /* The recorder may have been stopped while getUserMedia() was still
+         * pending. Release the camera and do not start capturing. */
+        if (stopped) {
+            try {
+                var lateTracks = stream.getTracks();
+                for (var i = 0; i < lateTracks.length; i++)
+                    lateTracks[i].stop();
+            } catch (e) {}
+            return;
+        }
+
         /**
          * Whether encoding has already been retried with software encoding
          * after a fatal encoder error. Only one retry is attempted per
@@ -705,6 +788,11 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         var captureFrameRate = trackSettings.frameRate || format.frameRate;
 
         var encoderOutput = function encoderOutput(chunk, meta) {
+                /* Chunks flushed during teardown must not be written to the
+                 * already-ended stream. */
+                if (stopped)
+                    return;
+
                 if (meta && meta.decoderConfig && meta.decoderConfig.description)
                     decoderConfig = parseAvccDecoderConfig(meta.decoderConfig.description);
 
@@ -776,6 +864,12 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
          * the capture entirely. */
         var encoderError = function encoderError(e) {
 
+            /* The teardown flush can raise a late error. After stop() there
+             * is nothing to restart or tear down, and onerror would be
+             * reported against whatever recorder replaced this one. */
+            if (stopped)
+                return;
+
             console.warn('Guacamole.H264CameraRecorder: video encoder error:', e);
 
             if (!triedSoftwareFallback && effectiveEncoderConfig
@@ -791,6 +885,10 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                     encoder = new VideoEncoder({ output: encoderOutput, error: encoderError });
                     encoder.configure(effectiveEncoderConfig);
                     noteEncoderBaseline(effectiveEncoderConfig);
+
+                    /* The old encoder is gone, so any keyframe it had in
+                     * flight will never arrive. */
+                    keyframePending = false;
                     requireKeyframe();
                     lastEncodedTsUs = -Infinity;
                     console.warn('Guacamole.H264CameraRecorder: retrying with software encoding: '
@@ -994,6 +1092,11 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
          * encoder has been configured. */
         chooseEncoderPreference().then(function configureEncoder(hwPref) {
 
+            /* Stopped while the preference probe was pending: the encoder
+             * has already been closed by stopVideoCapture(). */
+            if (stopped)
+                return;
+
             var encoderConfig = buildConfig(hwPref);
             effectiveEncoderConfig = encoderConfig;
             noteEncoderBaseline(encoderConfig);
@@ -1016,6 +1119,13 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                     + JSON.stringify(effectiveEncoderConfig));
 
         }).catch(function encoderSetupFailed(e) {
+
+            /* A second teardown after stop() would re-send "end" for a
+             * stream index that may already have been reused by a newer
+             * recorder, closing that recorder's stream. */
+            if (stopped)
+                return;
+
             console.warn('Guacamole.H264CameraRecorder: failed to configure video encoder:', e);
             stopVideoCapture();
             if (recorder.onerror)
@@ -1118,9 +1228,22 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
                     }
 
                     if (!congested && encoder && encoder.state === 'configured') {
+
+                        /* Give up on a pending keyframe whose output never
+                         * arrived, or no keyframe could ever be requested
+                         * again. See keyframePendingSinceMs. */
+                        if (keyframePending
+                                && nowMs - keyframePendingSinceMs >= forceIdrIntervalMs)
+                            keyframePending = false;
+
                         var wantPeriodicIdr = (Date.now() - lastKeyframeWallMs) >= forceIdrIntervalMs;
-                        var requestKey = needKeyframe || wantPeriodicIdr;
-                        encoder.encode(frame, { keyFrame: !!requestKey });
+                        var requestKey = (needKeyframe || wantPeriodicIdr)
+                                && !keyframePending;
+                        if (requestKey) {
+                            keyframePending = true;
+                            keyframePendingSinceMs = nowMs;
+                        }
+                        encoder.encode(frame, { keyFrame: requestKey });
                         lastEncodedTsUs = frame.timestamp;
                     }
                 }
@@ -1146,8 +1269,14 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      */
     var streamDenied = function streamDenied() {
 
+        /* If the recorder was already stopped, the stream has been ended
+         * and a newer recorder may be active; reporting an error here
+         * would wrongly mark that one as failed. */
+        if (stopped)
+            return;
+
         // Simply end stream if camera access is not allowed
-        writer.sendEnd();
+        endStreamOnce();
 
         // Notify of closure
         if (recorder.onerror)
@@ -1203,6 +1332,11 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
             if (format.frameRate > swMaxFps) format.frameRate = swMaxFps;
         }
 
+        /* Stopped while the encoder support probe above was running: do
+         * not open the camera at all. */
+        if (stopped)
+            return;
+
         // Attempt to retrieve a video input stream from the browser
         var videoConstraints = {
             width: format.width,
@@ -1254,6 +1388,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         baselinePtsUs = null;
         
         lastOutputPtsMs = null;
+        keyframePending = false;
         requireKeyframe();
         lastKeyframeWallMs = Date.now();
 
@@ -1273,7 +1408,7 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
         mediaStream = null;
 
         // End stream
-        writer.sendEnd();
+        endStreamOnce();
 
     };
 
@@ -1312,18 +1447,26 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      * Starts the camera recording process.
      */
     this.start = function start() {
-        if (!mediaStream) {
-            beginVideoCapture().catch(function captureStartFailed(e) {
-                console.warn('Guacamole.H264CameraRecorder: failed to begin video capture:', e);
-                streamDenied();
-            });
-        }
+
+        /* mediaStream alone cannot guard against a second start() call: it
+         * is only assigned once getUserMedia() resolves, and two captures
+         * requested in that window would share this instance's encoder and
+         * reader state. */
+        if (captureRequested || stopped)
+            return;
+        captureRequested = true;
+
+        beginVideoCapture().catch(function captureStartFailed(e) {
+            console.warn('Guacamole.H264CameraRecorder: failed to begin video capture:', e);
+            streamDenied();
+        });
     };
 
     /**
      * Stops the camera recording process.
      */
     this.stop = function stop() {
+        stopped = true;
         stopVideoCapture();
     };
 
@@ -1333,6 +1476,12 @@ Guacamole.H264CameraRecorder = function H264CameraRecorder(stream, mimetype) {
      * keyframe to resume decoding.
      */
     this.requestKeyframe = function requestKeyframe() {
+
+        /* The list is normally pruned by the encoding loop; cap it in case
+         * requests arrive while the loop is stalled waiting for frames. */
+        if (keyframeRequestTimes.length >= 16)
+            keyframeRequestTimes.shift();
+
         keyframeRequestTimes.push(Date.now());
         requireKeyframe();
     };
