@@ -204,7 +204,6 @@ Guacamole.Client = function(tunnel) {
 
                 var index = parseInt(key);
                 var layer = layersSnapshot[key];
-                var canvas = layer.toCanvas();
 
                 // Store layer/buffer dimensions
                 var exportLayer = {
@@ -213,8 +212,10 @@ Guacamole.Client = function(tunnel) {
                 };
 
                 // Store layer/buffer image data, if it can be generated
-                if (layer.width && layer.height)
+                if (layer.width && layer.height) {
+                    var canvas = layer.toCanvas();
                     exportLayer.url = canvas.toDataURL('image/png');
+                }
 
                 // Add layer properties if not a buffer nor the default layer
                 if (index > 0) {
@@ -515,6 +516,25 @@ Guacamole.Client = function(tunnel) {
         // Allocate and associate stream with audio metadata
         var stream = guac_client.createOutputStream();
         tunnel.sendMessage("audio", stream.index, mimetype);
+        return stream;
+
+    };
+
+    /**
+     * Opens a new video stream for writing, having the given mimetype. The
+     * instruction necessary to create this stream will automatically be sent.
+     *
+     * @param {!string} mimetype
+     *     The mimetype of the video data being sent.
+     *
+     * @return {!Guacamole.OutputStream}
+     *     The created video stream.
+     */
+    this.createVideoStream = function(mimetype) {
+
+        // Allocate and associate stream with video metadata
+        var stream = guac_client.createOutputStream();
+        tunnel.sendMessage("video", stream.index, mimetype);
         return stream;
 
     };

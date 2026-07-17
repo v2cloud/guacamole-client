@@ -54,6 +54,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
     const guacImage               = $injector.get('guacImage');
     const guacManageMonitor       = $injector.get('guacManageMonitor');
     const guacVideo               = $injector.get('guacVideo');
+    const guacRDPECAM             = $injector.get('guacRDPECAM');
 
     /**
      * The minimum amount of time to wait between updates to the client
@@ -64,11 +65,48 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
     var THUMBNAIL_UPDATE_FREQUENCY = 5000;
 
     /**
+     * A deferred pipe stream, that has yet to be consumed, as well as all
+     * axuilary information needed to pull data from the stream.
+     *
+     * @constructor
+     * @param {DeferredPipeStream|Object} [template={}]
+     *     The object whose properties should be copied within the new
+     *     DeferredPipeStream.
+     */
+    var DeferredPipeStream = function DeferredPipeStream(template) {
+
+        // Use empty object by default
+        template = template || {};
+
+        /**
+         * The stream that will receive data from the server.
+         *
+         * @type Guacamole.InputStream
+         */
+        this.stream = template.stream;
+
+        /**
+         * The mimetype of the data which will be received.
+         *
+         * @type String
+         */
+        this.mimetype = template.mimetype;
+
+        /**
+         * The name of the pipe.
+         *
+         * @type String
+         */
+        this.name = template.name;
+
+    };
+
+    /**
      * Object which serves as a surrogate interface, encapsulating a Guacamole
      * client while it is active, allowing it to be maintained in the
      * background. One or more ManagedClients are grouped within
      * ManagedClientGroups before being attached to the client view.
-     * 
+     *
      * @constructor
      * @param {ManagedClient|Object} [template={}]
      *     The object whose properties should be copied within the new
@@ -240,6 +278,22 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
          * @type {Object.<String, ManagedArgument>}
          */
         this.arguments = template.arguments || {};
+
+        /**
+         * Any received pipe streams that have not been consumed by an onpipe
+         * handler or registered pipe handler, indexed by pipe stream name.
+         *
+         * @type {Object.<String, Object>}
+         */
+        this.deferredPipeStreams = template.deferredPipeStreams || {};
+
+        /**
+         * Handlers for deferred pipe streams, indexed by the name of the pipe
+         * stream that the handler should handle.
+         *
+         * @type {Object.<String, Function>}
+         */
+        this.deferredPipeStreamHandlers = template.deferredPipeStreamHandlers || {};
 
     };
 
@@ -494,6 +548,11 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                     case Guacamole.Client.State.DISCONNECTING:
                     case Guacamole.Client.State.DISCONNECTED:
                         ManagedClient.updateThumbnail(managedClient);
+                        
+                        // Clean up camera redirection on disconnect
+                        if (clientState === Guacamole.Client.State.DISCONNECTED) {
+                            guacRDPECAM.stopCamera(client);
+                        }
                         break;
 
                 }
@@ -561,9 +620,38 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
         };
 
+        // A default onpipe implementation that will automatically defer any
+        // received pipe streams, automatically invoking any registered handlers
+        // that may already be set for the received name
+        client.onpipe = (stream, mimetype, name) => {
+
+            // Defer the pipe stream
+            managedClient.deferredPipeStreams[name] = new DeferredPipeStream(
+                    { stream, mimetype, name });
+
+            // Invoke the handler now, if set
+            const handler = managedClient.deferredPipeStreamHandlers[name];
+            if (handler) {
+
+                // Handle the stream, and clear from the deferred streams
+                handler(stream, mimetype, name);
+                delete managedClient.deferredPipeStreams[name];
+            }
+        };
+
+        /**
+         * Stops camera recording when server sends camera-stop signal.
+         * This is called when Windows sends Stop Streams Request.
+         */
+        function stopCamera() {
+            // Stop camera via guacRDPECAM service
+            guacRDPECAM.stopCamera(client);
+        }
+
         // Test for argument mutability whenever an argument value is
         // received
         client.onargv = function clientArgumentValueReceived(stream, mimetype, name) {
+
 
             // Ignore arguments which do not use a mimetype currently supported
             // by the web application
@@ -578,15 +666,60 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                 value += text;
             };
 
-            // Test mutability once stream is finished, storing the current
-            // value for the argument only if it is mutable
-            reader.onend = function textComplete() {
-                ManagedArgument.getInstance(managedClient, name, value).then(function argumentIsMutable(argument) {
-                    managedClient.arguments[name] = argument;
-                }, function immutableArguments() {
-                    managedClient.arguments[name] = value;
-                });
-            };
+            // Handle camera parameter reception (protocol-driven camera start)
+            // Prefer the single JSON argv path and ignore legacy per-parameter values.
+            if (name.indexOf('camera-') === 0) {
+                reader.onend = function cameraParameterReceived() {
+                    // Handle camera-stop signal (no parameters)
+                    if (name === 'camera-stop') {
+                        stopCamera();
+                        return;
+                    }
+
+                    // Handle server-requested keyframes (sent after dropping frames)
+                    if (name === 'camera-keyframe') {
+                        guacRDPECAM.requestKeyframe(client);
+                        return;
+                    }
+
+                    // Alternative concise form: "WIDTHxHEIGHT@FPS_NUM/FPS_DEN#STREAM_INDEX"
+                    if (name === 'camera-start') {
+                        try {
+                            var m = /^\s*(\d+)x(\d+)@(\d+)\/(\d+)(?:#(\d+)(?:#([^\s]*))?)?\s*$/.exec(value || '');
+                            if (!m) {
+                                return;
+                            }
+
+                            guacRDPECAM.startCameraWithParams(client, {
+                                width: parseInt(m[1]),
+                                height: parseInt(m[2]),
+                                fpsNum: parseInt(m[3]),
+                                fpsDenom: parseInt(m[4]) || 1,
+                                streamIndex: m[5] ? parseInt(m[5]) : 0,
+                                deviceId: m[6] ? m[6].toString() : undefined
+                            }).catch(function(error) {
+                                console.error('Failed to start camera with params:', error);
+                            });
+                        } catch (e) {
+                            // Failed to parse camera-start string - ignore
+                        }
+                        return;
+                    }
+                    return;
+                };
+            }
+            // Handle normal arguments (non-camera parameters)
+            else {
+                // Test mutability once stream is finished, storing the current
+                // value for the argument only if it is mutable
+                reader.onend = function textComplete() {
+                    ManagedArgument.getInstance(managedClient, name, value).then(function argumentIsMutable(argument) {
+                        managedClient.arguments[name] = argument;
+                    }, function immutableArguments() {
+                        managedClient.arguments[name] = value;
+                    });
+                };
+            }
 
         };
 
@@ -1035,6 +1168,72 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
         }
 
+    };
+
+
+    /**
+     * Register a handler that will be automatically invoked for any deferred
+     * pipe stream with the provided name, either when a pipe stream with a
+     * name matching a registered handler is received, or immediately when this
+     * function is called, if such a pipe stream has already been received.
+     *
+     * NOTE: Pipe streams are automatically deferred by the default onpipe
+     * implementation. To preserve this behavior when using a custom onpipe
+     * callback, make sure to defer to the default implementation as needed.
+     *
+     * @param {ManagedClient} managedClient
+     *     The client for which the deferred pipe stream handler should be set.
+     *
+     * @param {String} name
+     *     The name of the pipe stream that should be handeled by the provided
+     *     handler. If another handler is already registered for this name, it
+     *     will be replaced by the handler provided to this function.
+     *
+     * @param {Function} handler
+     *     The handler that should handle any deferred pipe stream with the
+     *     provided name. This function must take the same arguments as the
+     *     standard onpipe handler - namely, the stream itself, the mimetype,
+     *     and the name.
+     */
+    ManagedClient.registerDeferredPipeHandler = function registerDeferredPipeHandler(
+            managedClient, name, handler) {
+        managedClient.deferredPipeStreamHandlers[name] = handler;
+
+        // Invoke the handler now, if the pipestream has already been received
+        if (managedClient.deferredPipeStreams[name]) {
+
+            // Invoke the handler with the deferred pipe stream
+            var deferredStream = managedClient.deferredPipeStreams[name];
+            handler(deferredStream.stream,
+                    deferredStream.mimetype,
+                    deferredStream.name);
+
+            // Clean up the now-consumed pipe stream
+            delete managedClient.deferredPipeStreams[name];
+        }
+    };
+
+    /**
+     * Detach the provided deferred pipe stream handler, if it is currently
+     * registered for the provided pipe stream name.
+     *
+     * @param {String} name
+     *     The name of the associated pipe stream for the handler that should
+     *     be detached.
+     *
+     * @param {Function} handler
+     *     The handler that should be detached.
+     *
+     * @param {ManagedClient} managedClient
+     *     The client for which the deferred pipe stream handler should be
+     *     detached.
+     */
+    ManagedClient.detachDeferredPipeHandler = function detachDeferredPipeHandler(
+        managedClient, name, handler) {
+
+        // Remove the handler if found
+        if (managedClient.deferredPipeStreamHandlers[name] === handler)
+            delete managedClient.deferredPipeStreamHandlers[name];
     };
 
     return ManagedClient;
