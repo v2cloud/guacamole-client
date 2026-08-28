@@ -608,6 +608,39 @@ angular.module('clipboard').factory('clipboardService', ['$injector',
     };
 
     /**
+     * Assigns the given data to the internal clipboard only, leaving the
+     * local clipboard untouched, and broadcasts a "guacClipboard" event for
+     * consumption by external components like the "guacClient" directive.
+     *
+     * For data already known to be the content of the local clipboard, where
+     * writing it back is worse than redundant: setLocalClipboard() takes its
+     * cheap path only for text/plain where writeText() is available, and
+     * otherwise costs a synchronous focus/selection round-trip plus an object
+     * URL that is never revoked. Even the cheap path replaces every clipboard
+     * format with plain text, and rejects unless the document is focused.
+     *
+     * Reports no sync completion, unlike setClipboard(). Nothing in this
+     * window asked for this data, so clearing clipboardSyncInProgress would
+     * release a gate a resync here is still waiting on, letting a paste run
+     * against content that has not arrived.
+     *
+     * setClipboard()'s tail is otherwise duplicated rather than shared: it is
+     * on every connection's inbound path with no test coverage, and being a
+     * fork, leaving it byte-identical avoids a rebase conflict.
+     *
+     * @param {ClipboardData} data
+     *     The data to assign to the internal clipboard.
+     */
+    service.setInternalClipboard = function setInternalClipboard(data) {
+
+        // Update internal clipboard and broadcast event notifying of
+        // updated contents
+        storedClipboardData(data);
+        $rootScope.$broadcast('guacClipboard', data);
+
+    };
+
+    /**
      * Resynchronizes the local and internal clipboards, setting the contents
      * of the internal clipboard to that of the local clipboard (if local
      * clipboard access is granted) and broadcasting a "guacClipboard" event

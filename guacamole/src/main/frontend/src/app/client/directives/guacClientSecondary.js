@@ -344,8 +344,10 @@ angular.module('client').directive('guacClientSecondary', [function guacClient()
              * sendMouseState() does not add offsetX/Y a second time. */
             mouseState.offsetProcessed = true;
 
-            // Send mouse state to main window
-            guacManageMonitor.pushBroadcastMessage('mouseState', mouseState);
+            /* Via pushMouseState, so a click is held while this window's
+             * local clipboard is being read -- a context-menu paste relayed
+             * ahead of that read pastes the previous content. */
+            guacManageMonitor.pushMouseState(mouseState);
         });
 
         // Hide software cursor when mouse leaves display

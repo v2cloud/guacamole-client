@@ -24,9 +24,13 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
     function guacManageMonitor($injector) {
 
     // Required services
-    const $window        = $injector.get('$window');
-    const $rootScope     = $injector.get('$rootScope');
-    const guacFullscreen = $injector.get('guacFullscreen');
+    const $window          = $injector.get('$window');
+    const $rootScope       = $injector.get('$rootScope');
+    const guacFullscreen   = $injector.get('guacFullscreen');
+    const clipboardService = $injector.get('clipboardService');
+
+    // Required types
+    const ClipboardData = $injector.get('ClipboardData');
 
     /**
      * Additionals monitors windows opened.
@@ -70,6 +74,44 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
      * @type Function
      */
     let fullscreenChangeHandler = null;
+
+    /**
+     * Deregistration function for the $rootScope 'guacClipboard' listener
+     * added by init() on secondary monitor windows, or null if no listener
+     * is currently registered.
+     *
+     * @type Function
+     */
+    let clipboardListener = null;
+
+    /**
+     * Deregistration function for the 'clipboardSyncInProgress' listener
+     * added by init(), or null if none is registered.
+     *
+     * @type Function
+     */
+    let clipboardSyncListener = null;
+
+    /**
+     * Whether a read of this window's local clipboard is in flight.
+     *
+     * @type Boolean
+     */
+    let clipboardReadPending = false;
+
+    /**
+     * Mouse states held during a clipboard read, in the order they occurred.
+     *
+     * @type Object[]
+     */
+    const heldMouseStates = [];
+
+    /**
+     * Timer releasing held mouse states if the read never completes.
+     *
+     * @type Number
+     */
+    let holdTimer = null;
 
     /**
      * The maximum number of secondary monitors allowed.
@@ -371,13 +413,32 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
         if (scope !== undefined && scope !== null)
             monitorScope = String(scope);
 
+        /* init() can run more than once per window, with a different monitor
+         * type, so release the previous run's listeners here rather than in
+         * the branch that registered each one. */
+        if (fullscreenChangeHandler) {
+            document.removeEventListener('fullscreenchange', fullscreenChangeHandler);
+            fullscreenChangeHandler = null;
+        }
+
+        if (clipboardListener) {
+            clipboardListener();
+            clipboardListener = null;
+        }
+
+        if (clipboardSyncListener) {
+            clipboardSyncListener();
+            clipboardSyncListener = null;
+        }
+
+        /* Otherwise a hold from the previous run has nothing left to release
+         * it, including on the unsupported-browser return below. */
+        clearMouseHold();
+
         if (monitorType == "primary") {
 
             // Listen on fullscreenchange instead of hooking setFullscreenMode()
             // so ESC also reaches the secondaries.
-            if (fullscreenChangeHandler)
-                document.removeEventListener('fullscreenchange', fullscreenChangeHandler);
-
             fullscreenChangeHandler = function fullscreenChangeHandler() {
                 service.pushBroadcastMessage('fullscreen', !!guacFullscreen.isInFullscreenMode());
             };
@@ -411,6 +472,32 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
          *     Received message event.
          */
         broadcast.onmessage = messageHandlers[monitorType];
+
+        /* indexController reads the local clipboard on load/copy/cut/focus in
+         * every window, including this one, and clipboardService broadcasts
+         * the result. Only the primary has a tunnel, so without this listener
+         * a secondary's read is discarded and the session keeps whatever the
+         * primary last sent. Registered after the channel, having nowhere to
+         * relay to without one. */
+        if (monitorType !== "primary") {
+
+            clipboardListener = $rootScope.$on('guacClipboard',
+                function localClipboardChanged(event, data) {
+                    service.pushClipboard(data);
+                });
+
+            // Mouse states are held for the duration of a local read
+            clipboardSyncListener = $rootScope.$on('clipboardSyncInProgress',
+                function clipboardSyncChanged(event, inProgress) {
+
+                    clipboardReadPending = !!inProgress;
+
+                    if (!clipboardReadPending)
+                        flushMouseStates();
+
+                });
+
+        }
 
     };
 
@@ -593,6 +680,25 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
             // CTRL+ALT+SHIFT pressed on secondary window
             if (message.data.guacMenu && service.menuShown)
                 service.menuShown();
+
+            /* A secondary's local clipboard, relayed here because only this
+             * window has a tunnel. setInternalClipboard() stores it (where
+             * ManagedClient finds it for a newly-attached client) and
+             * broadcasts to guacClient, which writes the tunnel. The local
+             * clipboard is left alone -- this data is already its content.
+             *
+             * $broadcast dispatches whether or not a digest is running, so
+             * the tunnel write happens synchronously. Nothing on that path
+             * touches scope today; the $evalAsync() is how this file's other
+             * out-of-digest entry points hand control back (see
+             * releaseAddPending). */
+            if (message.data.clipboard) {
+                clipboardService.setInternalClipboard(new ClipboardData({
+                    type : message.data.clipboard.type,
+                    data : message.data.clipboard.data
+                }));
+                $rootScope.$evalAsync();
+            }
 
         },
 
@@ -782,6 +888,124 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
 
         // Send message on the broadcast channel
         broadcast.postMessage(message);
+
+    };
+
+    /**
+     * The longest a mouse state is held waiting for a clipboard read. A read
+     * takes ~10ms, or ~100ms more on the fallback path, so this expires only
+     * when one reports neither success nor failure. Capped because input
+     * matters more than a possibly-stale paste.
+     *
+     * @type Number
+     */
+    service.CLIPBOARD_HOLD_TIMEOUT = 250;
+
+    /**
+     * Relay every held mouse state, in the order the states occurred.
+     */
+    const flushMouseStates = function flushMouseStates() {
+
+        if (holdTimer !== null) {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+        }
+
+        while (heldMouseStates.length)
+            service.pushBroadcastMessage('mouseState', heldMouseStates.shift());
+
+    };
+
+    /**
+     * Discard any held mouse states and reset the hold.
+     */
+    const clearMouseHold = function clearMouseHold() {
+
+        if (holdTimer !== null) {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+        }
+
+        heldMouseStates.length = 0;
+        clipboardReadPending = false;
+
+    };
+
+    /**
+     * Relay a mouse state to the primary window, holding it while a local
+     * clipboard read is in flight.
+     *
+     * A context-menu paste is issued by a click, and the local clipboard is
+     * read asynchronously on focus, so a click relayed before that read
+     * completes pastes the previous content. guacClient gates the primary's
+     * own mouse events the same way.
+     *
+     * One queue rather than a timer per state, so a state arriving after the
+     * read completes cannot overtake one still waiting and relay a mouseup
+     * ahead of its mousedown.
+     *
+     * @param {Object} mouseState
+     *     The mouse state to relay. Only its fields are sent, so the caller
+     *     may reuse the object across events.
+     */
+    service.pushMouseState = function pushMouseState(mouseState) {
+
+        // Nothing to wait for: relay with no added latency
+        if (!clipboardReadPending && !heldMouseStates.length) {
+            service.pushBroadcastMessage('mouseState', mouseState);
+            return;
+        }
+
+        /* Copied: callers reuse one object per event, so a queued reference
+         * would collapse to the last state. */
+        heldMouseStates.push(angular.extend({}, mouseState));
+
+        if (holdTimer === null)
+            holdTimer = setTimeout(function holdExpired() {
+                holdTimer = null;
+                /* End the hold, not just this batch: otherwise a read that
+                 * never completes arms a fresh hold per event, batching input
+                 * at the cap forever. A later completion flushes nothing. */
+                clipboardReadPending = false;
+                flushMouseStates();
+            }, service.CLIPBOARD_HOLD_TIMEOUT);
+
+    };
+
+    /**
+     * Relay a local clipboard change to the primary window, so it reaches the
+     * remote session. A secondary's Guacamole.Client is built on the abstract
+     * Guacamole.Tunnel, whose sendMessage() is a no-op, so it cannot reach
+     * guacd itself -- the same reason its input is relayed.
+     *
+     * Data carrying a source came from the session and is ignored; relaying
+     * it would echo it straight back to guacd. Only a local clipboard read,
+     * which clipboardService leaves untagged, is relayed.
+     *
+     * @param {ClipboardData} data
+     *     The clipboard data the local clipboard now holds.
+     */
+    service.pushClipboard = function pushClipboard(data) {
+
+        /* The primary broadcasts 'guacClipboard' as it sends its own
+         * clipboard; relaying that would bounce between the windows. */
+        if (monitorType === "primary")
+            return;
+
+        // Nothing to relay, or data that came from the remote session
+        if (!data || data.source)
+            return;
+
+        /* Plain fields: the channel structured-clones its message, dropping
+         * the ClipboardData prototype, and the receiver rebuilds it. A Blob
+         * clones intact, though one rarely gets here -- readText() yields ''
+         * for an image-only clipboard, so an image copy relays '' and clears
+         * the remote clipboard. The primary does the same today; fix both at
+         * once. */
+        service.pushBroadcastMessage('clipboard', {
+            type : data.type,
+            data : data.data
+        });
 
     };
 
@@ -1035,6 +1259,20 @@ service.addInFlight = function addInFlight() {
             document.removeEventListener('fullscreenchange', fullscreenChangeHandler);
             fullscreenChangeHandler = null;
         }
+
+        // Drop the 'guacClipboard' listener added in init().
+        if (clipboardListener) {
+            clipboardListener();
+            clipboardListener = null;
+        }
+
+        // Drop the 'clipboardSyncInProgress' listener added in init()
+        if (clipboardSyncListener) {
+            clipboardSyncListener();
+            clipboardSyncListener = null;
+        }
+
+        clearMouseHold();
 
         // Release closures that captured the (now destroyed) controller scope.
         service.onMonitorsInfoUpdate = null;
